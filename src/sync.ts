@@ -3,8 +3,58 @@ import {
   setMeta,
   upsertMessage, getMessage, setSyncState,
   upsertDraft, getDraft, deleteDraft, listDraftIds,
+  upsertAttachmentForMessage,
   type MessageRow, type Recipient, type DraftRow, type FolderName,
 } from './cache.js';
+
+// ─── Attachment metadata ──────────────────────────────────────────────────────
+// Each OFW message detail returns `files: [fileId, ...]`. We fetch the metadata
+// for each file id (cheap JSON call) so the model can see filenames/mime types
+// without downloading bytes. Bytes are pulled lazily by ofw_download_attachment.
+
+interface FileMetaResponse {
+  fileId: number;
+  label?: string;
+  fileName?: string;
+  fileType?: string;          // MIME
+  fileSize?: number;
+  shared?: boolean;
+  shareClass?: string;
+  lastUpdateDate?: { dateTime?: string };
+}
+
+export async function fetchAndCacheAttachmentMeta(
+  client: OFWClient,
+  fileId: number,
+  messageId: number
+): Promise<void> {
+  try {
+    const meta = await client.request<FileMetaResponse>('GET', `/pub/v1/myfiles/${fileId}`);
+    upsertAttachmentForMessage({
+      fileId: meta.fileId ?? fileId,
+      fileName: meta.fileName ?? `file-${fileId}`,
+      label: meta.label ?? meta.fileName ?? `file-${fileId}`,
+      mimeType: meta.fileType ?? 'application/octet-stream',
+      sizeBytes: typeof meta.fileSize === 'number' ? meta.fileSize : null,
+      metadata: meta,
+      messageId,
+    });
+  } catch {
+    // Attachment metadata failures shouldn't break the surrounding sync.
+    // The file ids stay in the message's listData; the model can retry later
+    // via ofw_download_attachment, which will surface the actual error.
+  }
+}
+
+export async function fetchAttachmentMetaForMessage(
+  client: OFWClient,
+  messageId: number,
+  fileIds: number[]
+): Promise<void> {
+  for (const fid of fileIds) {
+    await fetchAndCacheAttachmentMeta(client, fid, messageId);
+  }
+}
 
 export interface FolderIds {
   inbox: string;
@@ -47,7 +97,7 @@ interface ListItem {
 }
 
 interface ListResponse { data?: ListItem[] }
-interface DetailResponse { body?: string }
+interface DetailResponse { body?: string; files?: number[] }
 
 export interface UnreadHint {
   id: number;
@@ -98,10 +148,14 @@ export async function syncMessageFolder(
 
       let body: string | null = null;
       let fetchedBodyAt: string | null = null;
+      let detailFileIds: number[] = [];
       if (shouldFetchBody) {
         const detail = await client.request<DetailResponse>('GET', `/pub/v3/messages/${item.id}`);
         body = detail.body ?? '';
         fetchedBodyAt = new Date().toISOString();
+        if (Array.isArray(detail.files) && detail.files.length > 0) {
+          detailFileIds = detail.files;
+        }
       } else {
         unread.push({
           id: item.id,
@@ -126,6 +180,9 @@ export async function syncMessageFolder(
       };
       upsertMessage(row);
       synced++;
+      if (detailFileIds.length > 0) {
+        await fetchAttachmentMetaForMessage(client, item.id, detailFileIds);
+      }
     }
 
     // Stop heuristic: a page with no new items means we've reached cached

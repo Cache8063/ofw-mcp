@@ -50,12 +50,20 @@ describe('openCache', () => {
     expect(names).toContain('meta');
   });
 
-  it('records schema_version=1 in meta', () => {
+  it('records the current schema_version in meta', () => {
     const cache = openCache();
     const row = cache.db
       .prepare('SELECT value FROM meta WHERE key = ?')
       .get('schema_version') as { value: string } | undefined;
-    expect(row?.value).toBe('1');
+    expect(row?.value).toBe('2');
+  });
+
+  it('creates the attachments table (v2)', () => {
+    const cache = openCache();
+    const tables = cache.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .all() as Array<{ name: string }>;
+    expect(tables.map((t) => t.name)).toContain('attachments');
   });
 
   it('is idempotent — opening twice does not error', () => {

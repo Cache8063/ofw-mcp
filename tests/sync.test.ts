@@ -6,6 +6,7 @@ import { OFWClient } from '../src/client.js';
 import {
   closeCache, getMeta, getMessage, listMessages, getSyncState, upsertMessage,
   getDraft, listDraftIds, upsertDraft,
+  listAttachmentsForMessage,
 } from '../src/cache.js';
 import { resolveFolderIds, syncMessageFolder, syncDrafts, syncAll } from '../src/sync.js';
 
@@ -243,6 +244,38 @@ describe('syncMessageFolder', () => {
 
     expect(result.synced).toBe(3);
     expect(listMessages({ folder: 'sent', page: 1, size: 50 }).map((m) => m.id)).toEqual([3, 2, 1]);
+  });
+
+  it('fetches attachment metadata for messages with files', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      // page 1: one message with files
+      .mockResolvedValueOnce({
+        data: [{
+          id: 100, subject: 'with attachment',
+          from: { name: 'Alice' }, date: { dateTime: '2026-05-13T12:00:00Z' },
+          showNeverViewed: false, recipients: [],
+        }],
+      })
+      // body fetch — includes files array
+      .mockResolvedValueOnce({ body: 'see attached', files: [55] })
+      // per-file metadata fetch
+      .mockResolvedValueOnce({
+        fileId: 55, fileName: 'doc.pdf', label: 'doc',
+        fileType: 'application/pdf', fileSize: 1024,
+      })
+      // page 2: empty
+      .mockResolvedValueOnce({ data: [] });
+
+    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false });
+    expect(result.synced).toBe(1);
+
+    const atts = listAttachmentsForMessage(100);
+    expect(atts).toHaveLength(1);
+    expect(atts[0].fileId).toBe(55);
+    expect(atts[0].fileName).toBe('doc.pdf');
+    expect(atts[0].mimeType).toBe('application/pdf');
+    expect(atts[0].sizeBytes).toBe(1024);
   });
 
   it('handles messages where OFW omits date.dateTime (regression)', async () => {

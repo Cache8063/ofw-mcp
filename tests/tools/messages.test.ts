@@ -1,11 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { OFWClient } from '../../src/client.js';
 import { registerMessageTools } from '../../src/tools/messages.js';
-import { closeCache, upsertMessage, upsertDraft, getMessage, getDraft } from '../../src/cache.js';
+import {
+  closeCache, upsertMessage, upsertDraft, getMessage, getDraft,
+  upsertAttachmentForMessage,
+} from '../../src/cache.js';
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>;
 
@@ -666,11 +669,93 @@ describe('ofw_get_unread_sent (cache-backed)', () => {
   });
 });
 
+describe('ofw_download_attachment', () => {
+  it('fetches metadata + bytes, writes file, returns path/mime/size', async () => {
+    const client = new OFWClient();
+    const xlsxBytes = Buffer.from('PKfake-xlsx-content', 'utf8');
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 50015547,
+      label: 'Hall Holiday Schedules 2026 - 2027.xlsx',
+      fileName: 'Hall_Holiday_Schedules_2026_-_2027.xlsx',
+      fileType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      fileSize: xlsxBytes.length,
+    });
+    vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      body: xlsxBytes,
+      contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      suggestedFileName: 'Hall_Holiday_Schedules_2026_-_2027.xlsx',
+    });
+    setup(client);
+
+    const downloadDir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    try {
+      const result = await handlers.get('ofw_download_attachment')!({ fileId: 50015547, saveTo: downloadDir + '/' });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.fileId).toBe(50015547);
+      expect(parsed.path).toMatch(/Hall_Holiday_Schedules/);
+      expect(parsed.mimeType).toContain('spreadsheetml');
+      expect(parsed.sizeBytes).toBe(xlsxBytes.length);
+      // File actually exists on disk
+      const written = readFileSync(parsed.path);
+      expect(written.equals(xlsxBytes)).toBe(true);
+    } finally {
+      rmSync(downloadDir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips re-download when the file is already at the same path (no force)', async () => {
+    const client = new OFWClient();
+    const reqSpy = vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 1, fileName: 'a.txt', label: 'a.txt', fileType: 'text/plain', fileSize: 4,
+    });
+    const binSpy = vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      body: Buffer.from('data'),
+      contentType: 'text/plain',
+      suggestedFileName: 'a.txt',
+    });
+    setup(client);
+    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    try {
+      // First call downloads.
+      await handlers.get('ofw_download_attachment')!({ fileId: 1, saveTo: dir + '/' });
+      // Second call should hit the short-circuit.
+      const second = await handlers.get('ofw_download_attachment')!({ fileId: 1, saveTo: dir + '/' });
+      expect(binSpy).toHaveBeenCalledTimes(1);
+      const parsed = JSON.parse(second.content[0].text);
+      expect(parsed.note).toBe('already downloaded');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      void reqSpy; // silence unused-var lint
+    }
+  });
+});
+
+describe('ofw_get_message attachments', () => {
+  it('surfaces attachments array on cached message', async () => {
+    upsertMessage({
+      id: 42, folder: 'inbox', subject: 'with attachment', fromUser: 'Alice',
+      sentAt: '2026-05-13T12:00:00Z', recipients: [], body: 'see attached',
+      fetchedBodyAt: '2026-05-13T12:01:00Z', replyToId: null, chainRootId: null, listData: {},
+    });
+    upsertAttachmentForMessage({
+      fileId: 99, fileName: 'doc.pdf', label: 'doc', mimeType: 'application/pdf',
+      sizeBytes: 1024, metadata: {}, messageId: 42,
+    });
+    const client = new OFWClient();
+    setup(client);
+    const result = await handlers.get('ofw_get_message')!({ messageId: '42' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.attachments).toHaveLength(1);
+    expect(parsed.attachments[0].fileId).toBe(99);
+    expect(parsed.attachments[0].fileName).toBe('doc.pdf');
+  });
+});
+
 describe('registerMessageTools', () => {
-  it('registers 9 message tools (8 original + ofw_sync_messages)', () => {
+  it('registers 10 message tools', () => {
     const client = makeClient({});
     setup(client);
-    expect(handlers.size).toBe(9);
+    expect(handlers.size).toBe(10);
     expect(handlers.has('ofw_list_message_folders')).toBe(true);
     expect(handlers.has('ofw_list_messages')).toBe(true);
     expect(handlers.has('ofw_get_message')).toBe(true);
@@ -680,5 +765,6 @@ describe('registerMessageTools', () => {
     expect(handlers.has('ofw_delete_draft')).toBe(true);
     expect(handlers.has('ofw_get_unread_sent')).toBe(true);
     expect(handlers.has('ofw_sync_messages')).toBe(true);
+    expect(handlers.has('ofw_download_attachment')).toBe(true);
   });
 });

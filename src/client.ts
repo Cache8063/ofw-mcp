@@ -39,6 +39,13 @@ interface LoginResponse {
   redirectUrl: string;
 }
 
+export interface BinaryResponse {
+  body: Buffer;
+  contentType: string | null;
+  /** Parsed from Content-Disposition header if present. */
+  suggestedFileName: string | null;
+}
+
 export class OFWClient {
   private token: string | null = null;
   private tokenExpiry: Date | null = null;
@@ -46,6 +53,51 @@ export class OFWClient {
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     await this.ensureAuthenticated();
     return this.doRequest<T>(method, path, body, false);
+  }
+
+  /** Like `request`, but returns the raw bytes plus Content-Type/-Disposition metadata. */
+  async requestBinary(method: string, path: string): Promise<BinaryResponse> {
+    await this.ensureAuthenticated();
+    return this.doRequestBinary(method, path, false);
+  }
+
+  private async doRequestBinary(method: string, path: string, isRetry: boolean): Promise<BinaryResponse> {
+    const headers: Record<string, string> = {
+      'ofw-client': 'WebApplication',
+      'ofw-version': '1.0.0',
+      Accept: 'application/octet-stream',
+      Authorization: `Bearer ${this.token!}`,
+    };
+    const response = await fetch(`${BASE_URL}${path}`, { method, headers });
+    if (response.status === 401 && !isRetry) {
+      this.token = null;
+      this.tokenExpiry = null;
+      await this.ensureAuthenticated();
+      return this.doRequestBinary(method, path, true);
+    }
+    if (response.status === 429 && !isRetry) {
+      await new Promise<void>((r) => setTimeout(r, 2000));
+      return this.doRequestBinary(method, path, true);
+    }
+    if (!response.ok) {
+      throw new Error(`OFW API error: ${response.status} ${response.statusText} for ${method} ${path}`);
+    }
+    const buf = Buffer.from(await response.arrayBuffer());
+    const cd = response.headers.get('content-disposition') ?? '';
+    // RFC 6266: filename*=UTF-8''… takes priority; fall back to filename="…"
+    let suggestedFileName: string | null = null;
+    const extMatch = /filename\*=(?:UTF-8'')?([^;]+)/i.exec(cd);
+    if (extMatch) {
+      try { suggestedFileName = decodeURIComponent(extMatch[1].trim().replace(/^"|"$/g, '')); } catch { suggestedFileName = extMatch[1]; }
+    } else {
+      const m = /filename="?([^";]+)"?/i.exec(cd);
+      if (m) suggestedFileName = m[1];
+    }
+    return {
+      body: buf,
+      contentType: response.headers.get('content-type'),
+      suggestedFileName,
+    };
   }
 
   private async doRequest<T>(

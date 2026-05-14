@@ -49,9 +49,28 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 `;
 
+// v2: add attachments table. Idempotent — IF NOT EXISTS.
+const SCHEMA_V2 = `
+CREATE TABLE IF NOT EXISTS attachments (
+  file_id INTEGER PRIMARY KEY,
+  file_name TEXT NOT NULL,
+  label TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  size_bytes INTEGER,
+  metadata_json TEXT NOT NULL,
+  message_ids_json TEXT NOT NULL,  -- JSON array of message ids that reference this file
+  downloaded_path TEXT,             -- absolute path on disk if/when downloaded
+  downloaded_at TEXT,
+  fetched_metadata_at TEXT NOT NULL
+);
+`;
+
 function migrate(db: DatabaseSync): void {
   db.exec(SCHEMA_V1);
-  db.prepare('INSERT OR IGNORE INTO meta(key, value) VALUES(?, ?)').run('schema_version', '1');
+  db.exec(SCHEMA_V2);
+  db.prepare(
+    'INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value'
+  ).run('schema_version', '2');
 }
 
 export function openCache(): Cache {
@@ -379,4 +398,114 @@ export function findLatestReplyTip(replyToId: number): number {
      ORDER BY id DESC LIMIT 1`
   ).get(chainRoot) as { id: number } | undefined;
   return tip ? tip.id : replyToId;
+}
+
+export interface AttachmentRow {
+  fileId: number;
+  fileName: string;
+  label: string;
+  mimeType: string;
+  sizeBytes: number | null;
+  metadata: unknown;
+  messageIds: number[];
+  downloadedPath: string | null;
+  downloadedAt: string | null;
+}
+
+interface AttachmentDbRow {
+  file_id: number;
+  file_name: string;
+  label: string;
+  mime_type: string;
+  size_bytes: number | null;
+  metadata_json: string;
+  message_ids_json: string;
+  downloaded_path: string | null;
+  downloaded_at: string | null;
+  fetched_metadata_at: string;
+}
+
+function attachmentFromDb(r: AttachmentDbRow): AttachmentRow {
+  return {
+    fileId: r.file_id,
+    fileName: r.file_name,
+    label: r.label,
+    mimeType: r.mime_type,
+    sizeBytes: r.size_bytes,
+    metadata: JSON.parse(r.metadata_json),
+    messageIds: JSON.parse(r.message_ids_json) as number[],
+    downloadedPath: r.downloaded_path,
+    downloadedAt: r.downloaded_at,
+  };
+}
+
+export function getAttachment(fileId: number): AttachmentRow | null {
+  const { db } = openCache();
+  const r = db.prepare('SELECT * FROM attachments WHERE file_id = ?').get(fileId) as AttachmentDbRow | undefined;
+  return r ? attachmentFromDb(r) : null;
+}
+
+export function listAttachmentsForMessage(messageId: number): AttachmentRow[] {
+  const { db } = openCache();
+  // SQLite JSON1 contains check
+  const rows = db.prepare(
+    `SELECT * FROM attachments
+     WHERE EXISTS (SELECT 1 FROM json_each(message_ids_json) WHERE value = ?)
+     ORDER BY file_id`
+  ).all(messageId) as unknown as AttachmentDbRow[];
+  return rows.map(attachmentFromDb);
+}
+
+export interface UpsertAttachmentInput {
+  fileId: number;
+  fileName: string;
+  label: string;
+  mimeType: string;
+  sizeBytes: number | null;
+  metadata: unknown;
+  /** Message id that references this attachment — appended to message_ids_json if not already present. */
+  messageId: number;
+}
+
+export function upsertAttachmentForMessage(input: UpsertAttachmentInput): void {
+  const { db } = openCache();
+  const existing = db.prepare('SELECT message_ids_json FROM attachments WHERE file_id = ?')
+    .get(input.fileId) as { message_ids_json: string } | undefined;
+  let messageIds: number[];
+  if (existing) {
+    const arr = JSON.parse(existing.message_ids_json) as number[];
+    messageIds = arr.includes(input.messageId) ? arr : [...arr, input.messageId];
+  } else {
+    messageIds = [input.messageId];
+  }
+  db.prepare(
+    `INSERT INTO attachments (
+       file_id, file_name, label, mime_type, size_bytes,
+       metadata_json, message_ids_json, fetched_metadata_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(file_id) DO UPDATE SET
+       file_name=excluded.file_name,
+       label=excluded.label,
+       mime_type=excluded.mime_type,
+       size_bytes=excluded.size_bytes,
+       metadata_json=excluded.metadata_json,
+       message_ids_json=excluded.message_ids_json,
+       fetched_metadata_at=excluded.fetched_metadata_at`
+  ).run(
+    input.fileId,
+    requireString('attachments.fileName', input.fileName),
+    requireString('attachments.label', input.label),
+    requireString('attachments.mimeType', input.mimeType),
+    nullish(input.sizeBytes),
+    JSON.stringify(input.metadata ?? null),
+    JSON.stringify(messageIds),
+    new Date().toISOString()
+  );
+}
+
+export function markAttachmentDownloaded(fileId: number, path: string): void {
+  const { db } = openCache();
+  db.prepare(
+    'UPDATE attachments SET downloaded_path = ?, downloaded_at = ? WHERE file_id = ?'
+  ).run(path, new Date().toISOString(), fileId);
 }

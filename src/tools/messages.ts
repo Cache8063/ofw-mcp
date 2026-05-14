@@ -1,12 +1,16 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
-import { syncAll } from '../sync.js';
+import { syncAll, fetchAttachmentMetaForMessage } from '../sync.js';
 import {
   listMessages, countMessages, listDrafts, getMessage, upsertMessage,
   upsertDraft, deleteDraft, findLatestReplyTip,
+  listAttachmentsForMessage, getAttachment, upsertAttachmentForMessage, markAttachmentDownloaded,
   type MessageRow, type DraftRow, type Recipient,
 } from '../cache.js';
+import { getAttachmentsDir } from '../config.js';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join, isAbsolute, resolve } from 'node:path';
 
 export function registerMessageTools(server: McpServer, client: OFWClient): void {
   server.registerTool('ofw_list_message_folders', {
@@ -73,12 +77,14 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     const id = Number(args.messageId);
     const cached = getMessage(id);
     if (cached && cached.body !== null) {
-      return { content: [{ type: 'text' as const, text: JSON.stringify(cached, null, 2) }] };
+      const attachments = listAttachmentsForMessage(id);
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ ...cached, attachments }, null, 2) }] };
     }
 
     const detail = await client.request<{
       id: number; body?: string; subject: string; from?: { name?: string };
       date: { dateTime: string };
+      files?: number[];
       recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
     }>('GET', `/pub/v3/messages/${encodeURIComponent(args.messageId)}`);
 
@@ -92,7 +98,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       folder,
       subject: detail.subject,
       fromUser: detail.from?.name ?? '',
-      sentAt: detail.date.dateTime,
+      sentAt: detail.date?.dateTime ?? new Date().toISOString(),
       recipients,
       body: detail.body ?? '',
       fetchedBodyAt: new Date().toISOString(),
@@ -101,7 +107,11 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       listData: cached?.listData ?? detail,
     };
     upsertMessage(row);
-    return { content: [{ type: 'text' as const, text: JSON.stringify(row, null, 2) }] };
+    if (Array.isArray(detail.files) && detail.files.length > 0) {
+      await fetchAttachmentMetaForMessage(client, detail.id, detail.files);
+    }
+    const attachments = listAttachmentsForMessage(detail.id);
+    return { content: [{ type: 'text' as const, text: JSON.stringify({ ...row, attachments }, null, 2) }] };
   });
 
   server.registerTool('ofw_send_message', {
@@ -298,6 +308,74 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       }, null, 2) }] };
     }
     return { content: [{ type: 'text' as const, text: JSON.stringify(unread, null, 2) }] };
+  });
+
+  server.registerTool('ofw_download_attachment', {
+    description: 'Download an OFW message attachment by fileId. Bytes are saved to disk; the tool returns the absolute path, mime type, and size so the caller can then read/analyze the file. fileId comes from the attachments array on ofw_get_message. Saves under ~/.cache/ofw-mcp/attachments/<hash>/ by default (override via OFW_ATTACHMENTS_DIR or the saveTo argument). Re-downloading is a no-op if the file is already on disk.',
+    annotations: { readOnlyHint: false },
+    inputSchema: {
+      fileId: z.number().describe('Attachment file id (from ofw_get_message → attachments[].fileId)'),
+      saveTo: z.string().describe('Absolute path or directory to write to. If a directory, the OFW filename is used. Default: ~/.cache/ofw-mcp/attachments/<hash>/<fileId>-<filename>').optional(),
+      force: z.boolean().describe('Re-download even if already on disk. Default false.').optional(),
+    },
+  }, async (args) => {
+    const fileId = args.fileId;
+    let cached = getAttachment(fileId);
+    if (!cached) {
+      // Metadata not in cache — fetch on the fly.
+      const meta = await client.request<{
+        fileId: number; label?: string; fileName?: string; fileType?: string; fileSize?: number;
+      }>('GET', `/pub/v1/myfiles/${fileId}`);
+      // Store with a sentinel "metadata-only, no message link" — we don't know which message asked.
+      // We'll re-link if a message later references it during sync.
+      upsertAttachmentForMessage({
+        fileId: meta.fileId ?? fileId,
+        fileName: meta.fileName ?? `file-${fileId}`,
+        label: meta.label ?? meta.fileName ?? `file-${fileId}`,
+        mimeType: meta.fileType ?? 'application/octet-stream',
+        sizeBytes: typeof meta.fileSize === 'number' ? meta.fileSize : null,
+        metadata: meta,
+        messageId: 0, // placeholder; will be cleaned up if a real message references it
+      });
+      cached = getAttachment(fileId);
+      if (!cached) throw new Error(`failed to fetch metadata for fileId ${fileId}`);
+    }
+
+    // Decide destination path
+    let dest: string;
+    if (args.saveTo) {
+      const expanded = args.saveTo.startsWith('~/')
+        ? join(process.env.HOME ?? '', args.saveTo.slice(2))
+        : args.saveTo;
+      const abs = isAbsolute(expanded) ? expanded : resolve(expanded);
+      // If it looks like a directory (ends with /) OR is an existing directory, treat as dir.
+      const isDirArg = expanded.endsWith('/') || expanded.endsWith('\\');
+      dest = isDirArg ? join(abs, `${fileId}-${cached.fileName}`) : abs;
+    } else {
+      dest = join(getAttachmentsDir(), `${fileId}-${cached.fileName}`);
+    }
+
+    // Short-circuit if already downloaded to this path
+    if (!args.force && cached.downloadedPath === dest) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({
+        fileId, path: dest, mimeType: cached.mimeType, sizeBytes: cached.sizeBytes,
+        fileName: cached.fileName, note: 'already downloaded',
+      }, null, 2) }] };
+    }
+
+    // Fetch bytes
+    const response = await client.requestBinary('GET', `/pub/v1/myfiles/${fileId}/data`);
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, response.body);
+    markAttachmentDownloaded(fileId, dest);
+
+    return { content: [{ type: 'text' as const, text: JSON.stringify({
+      fileId,
+      path: dest,
+      mimeType: response.contentType ?? cached.mimeType,
+      sizeBytes: response.body.length,
+      fileName: response.suggestedFileName ?? cached.fileName,
+    }, null, 2) }] };
   });
 
   server.registerTool('ofw_sync_messages', {

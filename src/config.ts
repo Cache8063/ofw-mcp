@@ -21,3 +21,12 @@ export function getCacheDbPath(): string {
   const hash = createHash('sha256').update(username).digest('hex').slice(0, 16);
   return join(getCacheDir(), `${hash}.db`);
 }
+
+export function getAttachmentsDir(): string {
+  const override = process.env.OFW_ATTACHMENTS_DIR;
+  if (override && override.trim().length > 0) return override.trim();
+  // Sibling to the cache db: ~/.cache/ofw-mcp/attachments/<hash>/
+  const username = readUsername();
+  const hash = createHash('sha256').update(username).digest('hex').slice(0, 16);
+  return join(getCacheDir(), 'attachments', hash);
+}
