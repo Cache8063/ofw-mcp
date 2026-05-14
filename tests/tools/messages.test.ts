@@ -842,6 +842,82 @@ describe('ofw_download_attachment', () => {
   });
 });
 
+describe('ofw_get_message attachments backfill', () => {
+  it('re-fetches detail to harvest fileIds when listData.files > 0 but cache is empty', async () => {
+    // Simulate a message bodied before attachment caching existed:
+    // body present, listData has files count, attachments table empty.
+    upsertMessage({
+      id: 7777, folder: 'inbox', subject: 'has attachment',
+      fromUser: 'Alice', sentAt: '2026-05-14T12:00:00Z',
+      recipients: [], body: 'see attached',
+      fetchedBodyAt: '2026-05-13T00:00:00Z',
+      replyToId: null, chainRootId: null,
+      listData: { id: 7777, files: 1, preview: 'see…' },
+    });
+
+    const client = new OFWClient();
+    // First call: detail re-fetch returns files array.
+    // Second call: attachment metadata fetch for fileId 4242.
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ id: 7777, body: 'see attached', files: [4242] })
+      .mockResolvedValueOnce({
+        fileId: 4242, fileName: 'invite.ics', label: 'invite',
+        fileType: 'text/calendar', fileSize: 512,
+      });
+    setup(client);
+
+    const result = await handlers.get('ofw_get_message')!({ messageId: '7777' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.attachments).toHaveLength(1);
+    expect(parsed.attachments[0].fileId).toBe(4242);
+    expect(parsed.attachments[0].fileName).toBe('invite.ics');
+    expect(parsed.attachments[0].mimeType).toBe('text/calendar');
+    // Two requests: detail + per-file metadata
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy.mock.calls[0][1]).toBe('/pub/v3/messages/7777');
+  });
+
+  it('does not re-fetch when listData has no files hint', async () => {
+    upsertMessage({
+      id: 8888, folder: 'inbox', subject: 'no attachment',
+      fromUser: 'Alice', sentAt: '2026-05-14T12:00:00Z',
+      recipients: [], body: 'plain',
+      fetchedBodyAt: '2026-05-13T00:00:00Z',
+      replyToId: null, chainRootId: null,
+      listData: { id: 8888, files: 0 },
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    setup(client);
+
+    await handlers.get('ofw_get_message')!({ messageId: '8888' });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('does not re-fetch when attachments are already cached', async () => {
+    upsertMessage({
+      id: 9999, folder: 'inbox', subject: 'has attachment',
+      fromUser: 'Alice', sentAt: '2026-05-14T12:00:00Z',
+      recipients: [], body: 'see attached',
+      fetchedBodyAt: '2026-05-13T00:00:00Z',
+      replyToId: null, chainRootId: null,
+      listData: { id: 9999, files: 1 },
+    });
+    upsertAttachmentForMessage({
+      fileId: 5555, fileName: 'doc.pdf', label: 'doc', mimeType: 'application/pdf',
+      sizeBytes: 100, metadata: {}, messageId: 9999,
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    setup(client);
+
+    const result = await handlers.get('ofw_get_message')!({ messageId: '9999' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.attachments).toHaveLength(1);
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
 describe('ofw_get_message attachments', () => {
   it('surfaces attachments array on cached message', async () => {
     upsertMessage({

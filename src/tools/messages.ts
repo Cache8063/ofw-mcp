@@ -40,6 +40,18 @@ function mimeFromName(name: string): string {
   return MIME_BY_EXT[extname(name).toLowerCase()] ?? 'application/octet-stream';
 }
 
+// The list endpoint payload (cached as `listData`) reports attachments via
+// `files: <count>` (a number) — the actual fileIds only appear on the detail
+// endpoint as `files: [number, ...]`. Some intermediate shapes return an
+// array on the list too. Treat any of those as "this message has files".
+function listDataHintsAtFiles(listData: unknown): boolean {
+  if (typeof listData !== 'object' || listData === null) return false;
+  const ld = listData as { files?: unknown };
+  if (typeof ld.files === 'number') return ld.files > 0;
+  if (Array.isArray(ld.files)) return ld.files.length > 0;
+  return false;
+}
+
 export function registerMessageTools(server: McpServer, client: OFWClient): void {
   server.registerTool('ofw_list_message_folders', {
     description: 'List OurFamilyWizard message folders (inbox, sent, etc.) and their unread counts. Returns folder IDs needed to call ofw_list_messages. Does NOT return message content.',
@@ -105,7 +117,25 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     const id = Number(args.messageId);
     const cached = getMessage(id);
     if (cached && cached.body !== null) {
-      const attachments = listAttachmentsForMessage(id);
+      let attachments = listAttachmentsForMessage(id);
+      // Lazy attachment backfill. The list-endpoint payload (stored in
+      // listData) hints at attachments via `files: <count>` but doesn't
+      // expose the fileIds — those live only on /pub/v3/messages/{id}.
+      // For messages bodied before attachment caching existed, the
+      // attachments table is empty even though OFW has files. Re-hit
+      // detail to harvest fileIds (idempotent: body is already cached so
+      // OFW state isn't changing).
+      if (attachments.length === 0 && listDataHintsAtFiles(cached.listData)) {
+        try {
+          const detail = await client.request<{ files?: number[] }>('GET', `/pub/v3/messages/${id}`);
+          if (Array.isArray(detail.files) && detail.files.length > 0) {
+            await fetchAttachmentMetaForMessage(client, id, detail.files);
+            attachments = listAttachmentsForMessage(id);
+          }
+        } catch {
+          // Backfill is best-effort. Fall through with whatever we have.
+        }
+      }
       return { content: [{ type: 'text' as const, text: JSON.stringify({ ...cached, attachments }, null, 2) }] };
     }
 

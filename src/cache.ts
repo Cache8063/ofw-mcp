@@ -471,12 +471,17 @@ export function upsertAttachmentForMessage(input: UpsertAttachmentInput): void {
   const { db } = openCache();
   const existing = db.prepare('SELECT message_ids_json FROM attachments WHERE file_id = ?')
     .get(input.fileId) as { message_ids_json: string } | undefined;
+  // messageId === 0 is the "metadata-only, not yet linked to a message"
+  // sentinel used by upload-without-send and download-by-id. Don't
+  // pollute the array with it — leave the list empty / unchanged.
+  const prior = existing ? (JSON.parse(existing.message_ids_json) as number[]) : [];
   let messageIds: number[];
-  if (existing) {
-    const arr = JSON.parse(existing.message_ids_json) as number[];
-    messageIds = arr.includes(input.messageId) ? arr : [...arr, input.messageId];
+  if (input.messageId === 0) {
+    messageIds = prior;
+  } else if (prior.includes(input.messageId)) {
+    messageIds = prior;
   } else {
-    messageIds = [input.messageId];
+    messageIds = [...prior, input.messageId];
   }
   db.prepare(
     `INSERT INTO attachments (
