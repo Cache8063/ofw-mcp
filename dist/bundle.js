@@ -30880,74 +30880,53 @@ function readVar(key) {
   return trimmed;
 }
 var BASE_URL = "https://ofw.ourfamilywizard.com";
-var STATIC_HEADERS = {
+var OFW_PROTOCOL_HEADERS = {
   "ofw-client": "WebApplication",
-  "ofw-version": "1.0.0",
-  Accept: "application/json",
-  "Content-Type": "application/json"
+  "ofw-version": "1.0.0"
 };
+function parseContentDispositionFilename(cd) {
+  const extMatch = /filename\*=(?:UTF-8'')?([^;]+)/i.exec(cd);
+  if (extMatch) {
+    const raw = extMatch[1].trim().replace(/^"|"$/g, "");
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  }
+  const m = /filename="?([^";]+)"?/i.exec(cd);
+  return m ? m[1] : null;
+}
 var OFWClient = class {
   token = null;
   tokenExpiry = null;
   async request(method, path, body) {
     await this.ensureAuthenticated();
-    return this.doRequest(method, path, body, false);
+    const response = await this.fetchWithRetry(method, path, body, "application/json", false);
+    const text = await response.text();
+    return text ? JSON.parse(text) : null;
   }
   /** Like `request`, but returns the raw bytes plus Content-Type/-Disposition metadata. */
   async requestBinary(method, path) {
     await this.ensureAuthenticated();
-    return this.doRequestBinary(method, path, false);
-  }
-  async doRequestBinary(method, path, isRetry) {
-    const headers = {
-      "ofw-client": "WebApplication",
-      "ofw-version": "1.0.0",
-      Accept: "application/octet-stream",
-      Authorization: `Bearer ${this.token}`
-    };
-    const response = await fetch(`${BASE_URL}${path}`, { method, headers });
-    if (response.status === 401 && !isRetry) {
-      this.token = null;
-      this.tokenExpiry = null;
-      await this.ensureAuthenticated();
-      return this.doRequestBinary(method, path, true);
-    }
-    if (response.status === 429 && !isRetry) {
-      await new Promise((r) => setTimeout(r, 2e3));
-      return this.doRequestBinary(method, path, true);
-    }
-    if (!response.ok) {
-      throw new Error(`OFW API error: ${response.status} ${response.statusText} for ${method} ${path}`);
-    }
-    const buf = Buffer.from(await response.arrayBuffer());
-    const cd = response.headers.get("content-disposition") ?? "";
-    let suggestedFileName = null;
-    const extMatch = /filename\*=(?:UTF-8'')?([^;]+)/i.exec(cd);
-    if (extMatch) {
-      try {
-        suggestedFileName = decodeURIComponent(extMatch[1].trim().replace(/^"|"$/g, ""));
-      } catch {
-        suggestedFileName = extMatch[1];
-      }
-    } else {
-      const m = /filename="?([^";]+)"?/i.exec(cd);
-      if (m) suggestedFileName = m[1];
-    }
+    const response = await this.fetchWithRetry(method, path, void 0, "application/octet-stream", false);
     return {
-      body: buf,
+      body: Buffer.from(await response.arrayBuffer()),
       contentType: response.headers.get("content-type"),
-      suggestedFileName
+      suggestedFileName: parseContentDispositionFilename(response.headers.get("content-disposition") ?? "")
     };
   }
-  async doRequest(method, path, body, isRetry) {
+  // Single fetch+retry scaffold for both JSON and binary callers. Handles
+  // 401 (re-auth and replay once), 429 (wait 2s and replay once), and
+  // turns any other non-2xx into a thrown Error.
+  async fetchWithRetry(method, path, body, accept, isRetry) {
     const isFormData = body instanceof FormData;
     const headers = {
-      "ofw-client": "WebApplication",
-      "ofw-version": "1.0.0",
-      Accept: "application/json",
+      ...OFW_PROTOCOL_HEADERS,
+      Accept: accept,
       Authorization: `Bearer ${this.token}`
     };
-    if (!isFormData) headers["Content-Type"] = "application/json";
+    if (body !== void 0 && !isFormData) headers["Content-Type"] = "application/json";
     const response = await fetch(`${BASE_URL}${path}`, {
       method,
       headers,
@@ -30957,22 +30936,19 @@ var OFWClient = class {
       this.token = null;
       this.tokenExpiry = null;
       await this.ensureAuthenticated();
-      return this.doRequest(method, path, body, true);
+      return this.fetchWithRetry(method, path, body, accept, true);
     }
     if (response.status === 429) {
       if (!isRetry) {
         await new Promise((r) => setTimeout(r, 2e3));
-        return this.doRequest(method, path, body, true);
+        return this.fetchWithRetry(method, path, body, accept, true);
       }
       throw new Error("Rate limited by OFW API");
     }
     if (!response.ok) {
-      throw new Error(
-        `OFW API error: ${response.status} ${response.statusText} for ${method} ${path}`
-      );
+      throw new Error(`OFW API error: ${response.status} ${response.statusText} for ${method} ${path}`);
     }
-    const text = await response.text();
-    return text ? JSON.parse(text) : null;
+    return response;
   }
   async ensureAuthenticated() {
     if (!this.isTokenExpiredSoon()) return;
@@ -30985,7 +30961,7 @@ var OFWClient = class {
       throw new Error("OFW_USERNAME and OFW_PASSWORD must be set");
     }
     const initResponse = await fetch(`${BASE_URL}/ofw/login.form`, {
-      headers: { "ofw-client": "WebApplication", "ofw-version": "1.0.0" },
+      headers: { ...OFW_PROTOCOL_HEADERS },
       redirect: "manual"
     });
     const setCookie = initResponse.headers.get("set-cookie") ?? "";
@@ -30993,7 +30969,8 @@ var OFWClient = class {
     const response = await fetch(`${BASE_URL}/ofw/login`, {
       method: "POST",
       headers: {
-        ...STATIC_HEADERS,
+        ...OFW_PROTOCOL_HEADERS,
+        Accept: "application/json",
         "Content-Type": "application/x-www-form-urlencoded",
         ...sessionCookie ? { Cookie: sessionCookie } : {}
       },
@@ -31023,6 +31000,26 @@ var OFWClient = class {
 };
 var client = new OFWClient();
 
+// src/tools/_shared.ts
+import { isAbsolute, join as join2, resolve } from "node:path";
+function jsonResponse(payload) {
+  return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
+}
+function textResponse(text) {
+  return { content: [{ type: "text", text }] };
+}
+function mapRecipients(items) {
+  return (items ?? []).map((r) => ({
+    userId: r.user?.id ?? 0,
+    name: r.user?.name ?? "",
+    viewedAt: r.viewed?.dateTime ?? null
+  }));
+}
+function expandPath(p) {
+  const expanded = p.startsWith("~/") ? join2(process.env.HOME ?? "", p.slice(2)) : p;
+  return isAbsolute(expanded) ? expanded : resolve(expanded);
+}
+
 // src/tools/user.ts
 function registerUserTools(server2, client2) {
   server2.registerTool("ofw_get_profile", {
@@ -31030,14 +31027,14 @@ function registerUserTools(server2, client2) {
     annotations: { readOnlyHint: true }
   }, async () => {
     const data = await client2.request("GET", "/pub/v2/profiles");
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    return jsonResponse(data);
   });
   server2.registerTool("ofw_get_notifications", {
     description: "Get OurFamilyWizard dashboard summary: unread message count, upcoming events, outstanding expenses. Note: updates your last-seen status.",
     annotations: { readOnlyHint: false }
   }, async () => {
     const data = await client2.request("GET", "/pub/v1/users/useraccountstatus");
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    return jsonResponse(data);
   });
 }
 
@@ -31049,7 +31046,7 @@ import { dirname as dirname2 } from "node:path";
 // src/config.ts
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { join as join2 } from "node:path";
+import { join as join3 } from "node:path";
 function readUsername() {
   const raw = process.env.OFW_USERNAME;
   if (typeof raw !== "string" || raw.trim().length === 0) {
@@ -31060,19 +31057,22 @@ function readUsername() {
 function getCacheDir() {
   const override = process.env.OFW_CACHE_DIR;
   if (override && override.trim().length > 0) return override.trim();
-  return join2(homedir(), ".cache", "ofw-mcp");
+  return join3(homedir(), ".cache", "ofw-mcp");
 }
 function getCacheDbPath() {
   const username = readUsername();
   const hash2 = createHash("sha256").update(username).digest("hex").slice(0, 16);
-  return join2(getCacheDir(), `${hash2}.db`);
+  return join3(getCacheDir(), `${hash2}.db`);
 }
 function getAttachmentsDir() {
   const override = process.env.OFW_ATTACHMENTS_DIR;
   if (override && override.trim().length > 0) return override.trim();
-  const username = readUsername();
-  const hash2 = createHash("sha256").update(username).digest("hex").slice(0, 16);
-  return join2(getCacheDir(), "attachments", hash2);
+  return join3(homedir(), "Downloads", "ofw-mcp");
+}
+function getDefaultInlineAttachments() {
+  const raw = process.env.OFW_INLINE_ATTACHMENTS;
+  if (typeof raw !== "string") return false;
+  return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
 }
 
 // src/cache.ts
@@ -31209,9 +31209,7 @@ function getMessage(id) {
   const r = db.prepare("SELECT * FROM messages WHERE id = ?").get(id);
   return r ? rowFromDb(r) : null;
 }
-function listMessages(opts) {
-  const { db } = openCache();
-  const offset = (opts.page - 1) * opts.size;
+function buildMessageFilter(opts) {
   const wheres = [];
   const params = [];
   if (opts.folder !== void 0) {
@@ -31231,37 +31229,25 @@ function listMessages(opts) {
     wheres.push("(subject LIKE ? OR body LIKE ?)");
     params.push(pattern, pattern);
   }
-  const where = wheres.length > 0 ? `WHERE ${wheres.join(" AND ")}` : "";
-  params.push(opts.size, offset);
+  return {
+    where: wheres.length > 0 ? `WHERE ${wheres.join(" AND ")}` : "",
+    params
+  };
+}
+function listMessages(opts) {
+  const { db } = openCache();
+  const { where, params } = buildMessageFilter(opts);
+  const offset = (opts.page - 1) * opts.size;
   const rows = db.prepare(
     `SELECT * FROM messages ${where}
      ORDER BY sent_at DESC, id DESC
      LIMIT ? OFFSET ?`
-  ).all(...params);
+  ).all(...params, opts.size, offset);
   return rows.map(rowFromDb);
 }
 function countMessages(opts) {
   const { db } = openCache();
-  const wheres = [];
-  const params = [];
-  if (opts.folder !== void 0) {
-    wheres.push("folder = ?");
-    params.push(opts.folder);
-  }
-  if (opts.since !== void 0) {
-    wheres.push("sent_at >= ?");
-    params.push(opts.since);
-  }
-  if (opts.until !== void 0) {
-    wheres.push("sent_at < ?");
-    params.push(opts.until);
-  }
-  if (opts.q !== void 0 && opts.q.length > 0) {
-    const pattern = `%${opts.q}%`;
-    wheres.push("(subject LIKE ? OR body LIKE ?)");
-    params.push(pattern, pattern);
-  }
-  const where = wheres.length > 0 ? `WHERE ${wheres.join(" AND ")}` : "";
+  const { where, params } = buildMessageFilter(opts);
   const r = db.prepare(`SELECT COUNT(*) as n FROM messages ${where}`).get(...params);
   return r?.n ?? 0;
 }
@@ -31420,24 +31406,24 @@ function markAttachmentDownloaded(fileId, path) {
 }
 
 // src/sync.ts
-async function fetchAndCacheAttachmentMeta(client2, fileId, messageId) {
-  try {
-    const meta3 = await client2.request("GET", `/pub/v1/myfiles/${fileId}`);
-    upsertAttachmentForMessage({
-      fileId: meta3.fileId ?? fileId,
-      fileName: meta3.fileName ?? `file-${fileId}`,
-      label: meta3.label ?? meta3.fileName ?? `file-${fileId}`,
-      mimeType: meta3.fileType ?? "application/octet-stream",
-      sizeBytes: typeof meta3.fileSize === "number" ? meta3.fileSize : null,
-      metadata: meta3,
-      messageId
-    });
-  } catch {
-  }
+async function fetchAttachmentMeta(client2, fileId, messageId) {
+  const meta3 = await client2.request("GET", `/pub/v1/myfiles/${fileId}`);
+  upsertAttachmentForMessage({
+    fileId: meta3.fileId ?? fileId,
+    fileName: meta3.fileName ?? `file-${fileId}`,
+    label: meta3.label ?? meta3.fileName ?? `file-${fileId}`,
+    mimeType: meta3.fileType ?? "application/octet-stream",
+    sizeBytes: typeof meta3.fileSize === "number" ? meta3.fileSize : null,
+    metadata: meta3,
+    messageId
+  });
 }
 async function fetchAttachmentMetaForMessage(client2, messageId, fileIds) {
   for (const fid of fileIds) {
-    await fetchAndCacheAttachmentMeta(client2, fid, messageId);
+    try {
+      await fetchAttachmentMeta(client2, fid, messageId);
+    } catch {
+    }
   }
 }
 async function resolveFolderIds(client2) {
@@ -31458,13 +31444,6 @@ async function resolveFolderIds(client2) {
   };
   setMeta("drafts_folder_id", ids.drafts);
   return ids;
-}
-function recipientsFromList(item) {
-  return (item.recipients ?? []).map((r) => ({
-    userId: r.user.id,
-    name: r.user.name,
-    viewedAt: r.viewed?.dateTime ?? null
-  }));
 }
 async function syncMessageFolder(client2, folder, folderId, opts) {
   let page = 1;
@@ -31508,7 +31487,7 @@ async function syncMessageFolder(client2, folder, folderId, opts) {
         subject: item.subject ?? "(no subject)",
         fromUser: item.from?.name ?? "",
         sentAt: item.date?.dateTime ?? (/* @__PURE__ */ new Date()).toISOString(),
-        recipients: recipientsFromList(item),
+        recipients: mapRecipients(item.recipients),
         body,
         fetchedBodyAt,
         replyToId: null,
@@ -31548,11 +31527,7 @@ async function syncDrafts(client2, draftsFolderId) {
       id: item.id,
       subject: detail.subject ?? item.subject ?? "(no subject)",
       body: detail.body ?? "",
-      recipients: (item.recipients ?? []).map((r) => ({
-        userId: r.user?.id ?? 0,
-        name: r.user?.name ?? "",
-        viewedAt: r.viewed?.dateTime ?? null
-      })),
+      recipients: mapRecipients(item.recipients),
       replyToId: item.replyToId ?? null,
       modifiedAt,
       listData: item
@@ -31595,7 +31570,7 @@ async function syncAll(client2, opts) {
 
 // src/tools/messages.ts
 import { mkdirSync as mkdirSync2, readFileSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname as dirname3, extname, join as join3, isAbsolute, resolve } from "node:path";
+import { basename, dirname as dirname3, extname, join as join4 } from "node:path";
 var MIME_BY_EXT = {
   ".pdf": "application/pdf",
   ".png": "image/png",
@@ -31636,7 +31611,7 @@ function registerMessageTools(server2, client2) {
     annotations: { readOnlyHint: true }
   }, async () => {
     const data = await client2.request("GET", "/pub/v1/messageFolders?includeFolderCounts=true");
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    return jsonResponse(data);
   });
   server2.registerTool("ofw_list_messages", {
     description: "List messages from the local OurFamilyWizard cache. Supports filtering by folder, date range, and a substring query on subject+body. Pagination is offset-based but if you know what you want (a date range, a topic), prefer the filters over walking pages \u2014 the cache may have 1000+ messages. Call ofw_sync_messages first if the cache is empty or stale.",
@@ -31658,15 +31633,10 @@ function registerMessageTools(server2, client2) {
     else if (folderArg === "sent") folder = "sent";
     else if (folderArg === "both") folder = void 0;
     else {
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            messages: [],
-            note: 'folderId must be "inbox", "sent", or "both". Numeric OFW folder IDs are not supported by the cache.'
-          }, null, 2)
-        }]
-      };
+      return jsonResponse({
+        messages: [],
+        note: 'folderId must be "inbox", "sent", or "both". Numeric OFW folder IDs are not supported by the cache.'
+      });
     }
     const filter = { folder, since: args.since, until: args.until, q: args.q };
     const total = countMessages(filter);
@@ -31677,7 +31647,7 @@ function registerMessageTools(server2, client2) {
     } else if (page * size < total) {
       payload.note = `Showing ${(page - 1) * size + 1}\u2013${(page - 1) * size + messages.length} of ${total}. Increase 'page' to see more, or narrow with since/until/q.`;
     }
-    return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
+    return jsonResponse(payload);
   });
   server2.registerTool("ofw_get_message", {
     description: "Get a single OurFamilyWizard message by ID. Reads from local cache when available; otherwise fetches from OFW (which will mark unread inbox messages as read on OFW).",
@@ -31700,14 +31670,9 @@ function registerMessageTools(server2, client2) {
         } catch {
         }
       }
-      return { content: [{ type: "text", text: JSON.stringify({ ...cached2, attachments: attachments2 }, null, 2) }] };
+      return jsonResponse({ ...cached2, attachments: attachments2 });
     }
     const detail = await client2.request("GET", `/pub/v3/messages/${encodeURIComponent(args.messageId)}`);
-    const recipients = (detail.recipients ?? []).map((r) => ({
-      userId: r.user.id,
-      name: r.user.name,
-      viewedAt: r.viewed?.dateTime ?? null
-    }));
     const folder = cached2?.folder ?? "inbox";
     const row = {
       id: detail.id,
@@ -31715,7 +31680,7 @@ function registerMessageTools(server2, client2) {
       subject: detail.subject,
       fromUser: detail.from?.name ?? "",
       sentAt: detail.date?.dateTime ?? (/* @__PURE__ */ new Date()).toISOString(),
-      recipients,
+      recipients: mapRecipients(detail.recipients),
       body: detail.body ?? "",
       fetchedBodyAt: (/* @__PURE__ */ new Date()).toISOString(),
       replyToId: cached2?.replyToId ?? null,
@@ -31727,7 +31692,7 @@ function registerMessageTools(server2, client2) {
       await fetchAttachmentMetaForMessage(client2, detail.id, detail.files);
     }
     const attachments = listAttachmentsForMessage(detail.id);
-    return { content: [{ type: "text", text: JSON.stringify({ ...row, attachments }, null, 2) }] };
+    return jsonResponse({ ...row, attachments });
   });
   server2.registerTool("ofw_send_message", {
     description: "Send a message via OurFamilyWizard. If sending from a draft, pass draftId to delete the draft after sending. If replyToId is provided, the cache may rewrite it to the latest reply in the same thread (a note is included in the response when this happens). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs.",
@@ -31764,18 +31729,13 @@ function registerMessageTools(server2, client2) {
       replyToId: resolvedReplyTo
     });
     if (data && typeof data.id === "number") {
-      const recipients = (data.recipients ?? []).map((r) => ({
-        userId: r.user.id,
-        name: r.user.name,
-        viewedAt: r.viewed?.dateTime ?? null
-      }));
       const row = {
         id: data.id,
         folder: "sent",
         subject: data.subject ?? args.subject,
         fromUser: data.from?.name ?? "",
         sentAt: data.date?.dateTime ?? (/* @__PURE__ */ new Date()).toISOString(),
-        recipients,
+        recipients: mapRecipients(data.recipients),
         body: data.body ?? args.body,
         fetchedBodyAt: (/* @__PURE__ */ new Date()).toISOString(),
         replyToId: resolvedReplyTo,
@@ -31797,16 +31757,13 @@ function registerMessageTools(server2, client2) {
       }
     }
     if (args.draftId !== void 0) {
-      const form = new FormData();
-      form.append("messageIds", String(args.draftId));
-      await client2.request("DELETE", "/pub/v1/messages", form);
+      await deleteOFWMessages(client2, [args.draftId]);
       deleteDraft(args.draftId);
     }
     const text = data ? JSON.stringify(data, null, 2) : "Message sent successfully.";
-    const finalText = rewriteNote ? `${rewriteNote}
+    return textResponse(rewriteNote ? `${rewriteNote}
 
-${text}` : text;
-    return { content: [{ type: "text", text: finalText }] };
+${text}` : text);
   });
   server2.registerTool("ofw_list_drafts", {
     description: "List draft messages from the local OurFamilyWizard cache. Call ofw_sync_messages first if the cache is empty.",
@@ -31820,7 +31777,7 @@ ${text}` : text;
     const size = args.size ?? 50;
     const drafts = listDrafts({ page, size });
     const payload = drafts.length === 0 ? { drafts: [], note: "Cache empty. Call ofw_sync_messages to populate." } : { drafts };
-    return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
+    return jsonResponse(payload);
   });
   server2.registerTool("ofw_save_draft", {
     description: "Save a message as a draft in OurFamilyWizard. Recipients are optional. To update an existing draft, provide its messageId. If replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included in response). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs.",
@@ -31860,11 +31817,7 @@ ${text}` : text;
         id: data.id,
         subject: data.subject ?? args.subject,
         body: data.body ?? args.body,
-        recipients: (data.recipients ?? []).map((r) => ({
-          userId: r.user.id,
-          name: r.user.name,
-          viewedAt: r.viewed?.dateTime ?? null
-        })),
+        recipients: mapRecipients(data.recipients),
         replyToId: data.replyToId ?? resolvedReplyTo,
         modifiedAt: data.date?.dateTime ?? (/* @__PURE__ */ new Date()).toISOString(),
         listData: data
@@ -31872,10 +31825,9 @@ ${text}` : text;
       upsertDraft(draft);
     }
     const text = data ? JSON.stringify(data, null, 2) : "Draft saved.";
-    const finalText = rewriteNote ? `${rewriteNote}
+    return textResponse(rewriteNote ? `${rewriteNote}
 
-${text}` : text;
-    return { content: [{ type: "text", text: finalText }] };
+${text}` : text);
   });
   server2.registerTool("ofw_delete_draft", {
     description: "Delete a draft message from OurFamilyWizard. Also removes the draft from the local cache.",
@@ -31884,11 +31836,9 @@ ${text}` : text;
       messageId: external_exports.number().describe("Draft message ID to delete")
     }
   }, async (args) => {
-    const form = new FormData();
-    form.append("messageIds", String(args.messageId));
-    const data = await client2.request("DELETE", "/pub/v1/messages", form);
+    const data = await deleteOFWMessages(client2, [args.messageId]);
     deleteDraft(args.messageId);
-    return { content: [{ type: "text", text: data ? JSON.stringify(data, null, 2) : "Draft deleted." }] };
+    return data ? jsonResponse(data) : textResponse("Draft deleted.");
   });
   server2.registerTool("ofw_get_unread_sent", {
     description: "List sent messages that have not been read by one or more recipients. Reads from local cache; call ofw_sync_messages first if cache is stale.",
@@ -31902,9 +31852,7 @@ ${text}` : text;
     const size = args.size ?? 50;
     const sent = listMessages({ folder: "sent", page, size });
     if (sent.length === 0) {
-      return { content: [{ type: "text", text: JSON.stringify({
-        note: "Sent cache is empty. Call ofw_sync_messages to populate."
-      }, null, 2) }] };
+      return jsonResponse({ note: "Sent cache is empty. Call ofw_sync_messages to populate." });
     }
     const unread = [];
     for (const msg of sent) {
@@ -31914,11 +31862,9 @@ ${text}` : text;
       }
     }
     if (unread.length === 0) {
-      return { content: [{ type: "text", text: JSON.stringify({
-        message: "All scanned sent messages have been read."
-      }, null, 2) }] };
+      return jsonResponse({ message: "All scanned sent messages have been read." });
     }
-    return { content: [{ type: "text", text: JSON.stringify(unread, null, 2) }] };
+    return jsonResponse(unread);
   });
   server2.registerTool("ofw_upload_attachment", {
     description: `Upload a local file to OurFamilyWizard's "My Files" so it can be attached to a message. Returns the fileId \u2014 pass that to ofw_send_message or ofw_save_draft in myFileIDs to attach it. The file is uploaded as PRIVATE (visible only to you) by default; pass shareClass:"SHARED" to share with co-parents directly via the My Files area.`,
@@ -31930,8 +31876,7 @@ ${text}` : text;
       description: external_exports.string().describe("Description shown in OFW My Files (default: filename)").optional()
     }
   }, async (args) => {
-    const expanded = args.path.startsWith("~/") ? join3(process.env.HOME ?? "", args.path.slice(2)) : args.path;
-    const abs = isAbsolute(expanded) ? expanded : resolve(expanded);
+    const abs = expandPath(args.path);
     const stat = statSync(abs);
     if (!stat.isFile()) throw new Error(`Not a file: ${abs}`);
     const buf = readFileSync(abs);
@@ -31954,71 +31899,95 @@ ${text}` : text;
       metadata: meta3,
       messageId: 0
     });
-    return { content: [{ type: "text", text: JSON.stringify({
+    return jsonResponse({
       fileId: meta3.fileId,
       fileName: meta3.fileName ?? fileName,
       mimeType: meta3.fileType ?? mime,
       sizeBytes: meta3.sizeInBytes ?? buf.length,
       shareClass: meta3.shareClass ?? args.shareClass ?? "PRIVATE",
       note: "Pass this fileId to ofw_send_message or ofw_save_draft in myFileIDs to attach it."
-    }, null, 2) }] };
+    });
   });
   server2.registerTool("ofw_download_attachment", {
-    description: "Download an OFW message attachment by fileId. Bytes are saved to disk; the tool returns the absolute path, mime type, and size so the caller can then read/analyze the file. fileId comes from the attachments array on ofw_get_message. Saves under ~/.cache/ofw-mcp/attachments/<hash>/ by default (override via OFW_ATTACHMENTS_DIR or the saveTo argument). Re-downloading is a no-op if the file is already on disk.",
+    description: 'Download an OFW message attachment by fileId. By default, bytes are saved to disk (~/Downloads/ofw-mcp/) and the response carries the absolute path, mime type, and size for the caller to read back. Pass inline:true to skip disk entirely and return the bytes as MCP content blocks \u2014 images come back as ImageContent (the model sees them directly); other files come back as an EmbeddedResource blob. Use inline for small files where you want the model to read content immediately and the host is sandboxed; use disk for large files or when you want a persistent local copy. The default for `inline` can be flipped server-side via the OFW_INLINE_ATTACHMENTS env var (set to "true" to make inline the default). fileId comes from attachments[].fileId on ofw_get_message. Override disk destination with OFW_ATTACHMENTS_DIR or saveTo. Re-downloading to the same path is a no-op (disk mode only).',
     annotations: { readOnlyHint: false },
     inputSchema: {
       fileId: external_exports.number().describe("Attachment file id (from ofw_get_message \u2192 attachments[].fileId)"),
-      saveTo: external_exports.string().describe("Absolute path or directory to write to. If a directory, the OFW filename is used. Default: ~/.cache/ofw-mcp/attachments/<hash>/<fileId>-<filename>").optional(),
-      force: external_exports.boolean().describe("Re-download even if already on disk. Default false.").optional()
+      inline: external_exports.boolean().describe("If true, return bytes inline as MCP content (image for image/*, embedded resource blob otherwise) and skip the disk write. If false, write to disk and return the path. If omitted, falls back to the OFW_INLINE_ATTACHMENTS env var (default: false = disk).").optional(),
+      saveTo: external_exports.string().describe("Absolute path or directory to write to. If a directory, the OFW filename is used. Default: ~/Downloads/ofw-mcp/<fileId>-<filename>. Ignored when inline:true.").optional(),
+      force: external_exports.boolean().describe("Re-download even if already on disk. Default false. Ignored when inline:true (inline always fetches fresh bytes, or reuses an on-disk copy if present).").optional()
     }
   }, async (args) => {
     const fileId = args.fileId;
+    const inline = args.inline ?? getDefaultInlineAttachments();
     let cached2 = getAttachment(fileId);
     if (!cached2) {
-      const meta3 = await client2.request("GET", `/pub/v1/myfiles/${fileId}`);
-      upsertAttachmentForMessage({
-        fileId: meta3.fileId ?? fileId,
-        fileName: meta3.fileName ?? `file-${fileId}`,
-        label: meta3.label ?? meta3.fileName ?? `file-${fileId}`,
-        mimeType: meta3.fileType ?? "application/octet-stream",
-        sizeBytes: typeof meta3.fileSize === "number" ? meta3.fileSize : null,
-        metadata: meta3,
-        messageId: 0
-        // placeholder; will be cleaned up if a real message references it
-      });
+      await fetchAttachmentMeta(client2, fileId, 0);
       cached2 = getAttachment(fileId);
       if (!cached2) throw new Error(`failed to fetch metadata for fileId ${fileId}`);
     }
+    if (inline) {
+      let bytes = null;
+      let mimeType = cached2.mimeType;
+      let fileName = cached2.fileName;
+      if (cached2.downloadedPath) {
+        try {
+          bytes = readFileSync(cached2.downloadedPath);
+        } catch {
+        }
+      }
+      if (bytes === null) {
+        const response2 = await client2.requestBinary("GET", `/pub/v1/myfiles/${fileId}/data`);
+        bytes = response2.body;
+        mimeType = response2.contentType ?? cached2.mimeType;
+        fileName = response2.suggestedFileName ?? cached2.fileName;
+      }
+      const base643 = bytes.toString("base64");
+      const metaBlock = { type: "text", text: JSON.stringify({
+        fileId,
+        fileName,
+        mimeType,
+        sizeBytes: bytes.length,
+        mode: "inline"
+      }, null, 2) };
+      if (mimeType.startsWith("image/")) {
+        return { content: [metaBlock, { type: "image", data: base643, mimeType }] };
+      }
+      return { content: [metaBlock, { type: "resource", resource: {
+        uri: `ofw://attachment/${fileId}/${encodeURIComponent(fileName)}`,
+        mimeType,
+        blob: base643
+      } }] };
+    }
     let dest;
     if (args.saveTo) {
-      const expanded = args.saveTo.startsWith("~/") ? join3(process.env.HOME ?? "", args.saveTo.slice(2)) : args.saveTo;
-      const abs = isAbsolute(expanded) ? expanded : resolve(expanded);
-      const isDirArg = expanded.endsWith("/") || expanded.endsWith("\\");
-      dest = isDirArg ? join3(abs, `${fileId}-${cached2.fileName}`) : abs;
+      const isDirArg = args.saveTo.endsWith("/") || args.saveTo.endsWith("\\");
+      const abs = expandPath(args.saveTo);
+      dest = isDirArg ? join4(abs, `${fileId}-${cached2.fileName}`) : abs;
     } else {
-      dest = join3(getAttachmentsDir(), `${fileId}-${cached2.fileName}`);
+      dest = join4(getAttachmentsDir(), `${fileId}-${cached2.fileName}`);
     }
     if (!args.force && cached2.downloadedPath === dest) {
-      return { content: [{ type: "text", text: JSON.stringify({
+      return jsonResponse({
         fileId,
         path: dest,
         mimeType: cached2.mimeType,
         sizeBytes: cached2.sizeBytes,
         fileName: cached2.fileName,
         note: "already downloaded"
-      }, null, 2) }] };
+      });
     }
     const response = await client2.requestBinary("GET", `/pub/v1/myfiles/${fileId}/data`);
     mkdirSync2(dirname3(dest), { recursive: true });
     writeFileSync(dest, response.body);
     markAttachmentDownloaded(fileId, dest);
-    return { content: [{ type: "text", text: JSON.stringify({
+    return jsonResponse({
       fileId,
       path: dest,
       mimeType: response.contentType ?? cached2.mimeType,
       sizeBytes: response.body.length,
       fileName: response.suggestedFileName ?? cached2.fileName
-    }, null, 2) }] };
+    });
   });
   server2.registerTool("ofw_sync_messages", {
     description: "Sync messages from OurFamilyWizard into the local cache. Returns counts per folder and a list of unread inbox messages whose bodies were NOT fetched (to avoid mark-as-read on OFW). Call ofw_get_message(id) on those to read them. Pass deep:true to walk all OFW pages instead of stopping at the first all-cached page (use to backfill suspected gaps).",
@@ -32034,8 +32003,13 @@ ${text}` : text;
       fetchUnreadBodies: args.fetchUnreadBodies,
       deep: args.deep
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return jsonResponse(result);
   });
+}
+async function deleteOFWMessages(client2, ids) {
+  const form = new FormData();
+  for (const id of ids) form.append("messageIds", String(id));
+  return client2.request("DELETE", "/pub/v1/messages", form);
 }
 
 // src/tools/calendar.ts
@@ -32054,7 +32028,7 @@ function registerCalendarTools(server2, client2) {
       "GET",
       `/pub/v1/calendar/${variant}?startDate=${encodeURIComponent(args.startDate)}&endDate=${encodeURIComponent(args.endDate)}`
     );
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    return jsonResponse(data);
   });
   server2.registerTool("ofw_create_event", {
     description: "Create a calendar event in OurFamilyWizard",
@@ -32074,7 +32048,7 @@ function registerCalendarTools(server2, client2) {
     }
   }, async (args) => {
     const data = await client2.request("POST", "/pub/v1/calendar/events", args);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    return jsonResponse(data);
   });
   server2.registerTool("ofw_update_event", {
     description: "Update an existing OurFamilyWizard calendar event",
@@ -32092,7 +32066,7 @@ function registerCalendarTools(server2, client2) {
   }, async (args) => {
     const { eventId, ...updateData } = args;
     const data = await client2.request("PUT", `/pub/v1/calendar/events/${encodeURIComponent(eventId)}`, updateData);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    return jsonResponse(data);
   });
   server2.registerTool("ofw_delete_event", {
     description: "Delete an OurFamilyWizard calendar event",
@@ -32102,7 +32076,7 @@ function registerCalendarTools(server2, client2) {
     }
   }, async (args) => {
     await client2.request("DELETE", `/pub/v1/calendar/events/${encodeURIComponent(args.eventId)}`);
-    return { content: [{ type: "text", text: `Event ${args.eventId} deleted` }] };
+    return textResponse(`Event ${args.eventId} deleted`);
   });
 }
 
@@ -32113,7 +32087,7 @@ function registerExpenseTools(server2, client2) {
     annotations: { readOnlyHint: true }
   }, async () => {
     const data = await client2.request("GET", "/pub/v2/expense/expenses/totals");
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    return jsonResponse(data);
   });
   server2.registerTool("ofw_list_expenses", {
     description: "List OurFamilyWizard expenses with pagination",
@@ -32126,7 +32100,7 @@ function registerExpenseTools(server2, client2) {
     const start = args.start ?? 0;
     const max = args.max ?? 20;
     const data = await client2.request("GET", `/pub/v2/expense/expenses?start=${start}&max=${max}`);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    return jsonResponse(data);
   });
   server2.registerTool("ofw_create_expense", {
     description: "Log a new expense in OurFamilyWizard",
@@ -32137,7 +32111,7 @@ function registerExpenseTools(server2, client2) {
     }
   }, async (args) => {
     const data = await client2.request("POST", "/pub/v2/expense/expenses", args);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    return jsonResponse(data);
   });
 }
 
@@ -32154,7 +32128,7 @@ function registerJournalTools(server2, client2) {
     const start = args.start ?? 1;
     const max = args.max ?? 10;
     const data = await client2.request("GET", `/pub/v1/journals?start=${start}&max=${max}`);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    return jsonResponse(data);
   });
   server2.registerTool("ofw_create_journal_entry", {
     description: "Create a new journal entry in OurFamilyWizard",
@@ -32165,7 +32139,7 @@ function registerJournalTools(server2, client2) {
     }
   }, async (args) => {
     const data = await client2.request("POST", "/pub/v1/journals", args);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    return jsonResponse(data);
   });
 }
 

@@ -815,6 +815,210 @@ describe('ofw_download_attachment', () => {
     }
   });
 
+  it('inline:true returns ImageContent for image MIME and writes no file', async () => {
+    const client = new OFWClient();
+    const pngBytes = Buffer.from('\x89PNGfake-png-bytes', 'binary');
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 42, fileName: 'kid.png', label: 'kid.png',
+      fileType: 'image/png', fileSize: pngBytes.length,
+    });
+    const binSpy = vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      body: pngBytes, contentType: 'image/png', suggestedFileName: 'kid.png',
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_download_attachment')!({ fileId: 42, inline: true });
+    expect(binSpy).toHaveBeenCalledTimes(1);
+    expect(result.content).toHaveLength(2);
+    const meta = JSON.parse(result.content[0].text);
+    expect(meta).toMatchObject({ fileId: 42, fileName: 'kid.png', mimeType: 'image/png', mode: 'inline', sizeBytes: pngBytes.length });
+    const img = result.content[1];
+    expect(img.type).toBe('image');
+    expect(img.mimeType).toBe('image/png');
+    expect(Buffer.from(img.data, 'base64').equals(pngBytes)).toBe(true);
+  });
+
+  it('inline:true returns EmbeddedResource blob for non-image MIME', async () => {
+    const client = new OFWClient();
+    const pdfBytes = Buffer.from('%PDF-1.4 fake pdf', 'utf8');
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 7, fileName: 'receipt.pdf', label: 'receipt.pdf',
+      fileType: 'application/pdf', fileSize: pdfBytes.length,
+    });
+    vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      body: pdfBytes, contentType: 'application/pdf', suggestedFileName: 'receipt.pdf',
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_download_attachment')!({ fileId: 7, inline: true });
+    expect(result.content).toHaveLength(2);
+    const res = result.content[1];
+    expect(res.type).toBe('resource');
+    expect(res.resource.mimeType).toBe('application/pdf');
+    expect(res.resource.uri).toBe('ofw://attachment/7/receipt.pdf');
+    expect(Buffer.from(res.resource.blob, 'base64').equals(pdfBytes)).toBe(true);
+  });
+
+  it('OFW_INLINE_ATTACHMENTS=true makes inline the default when arg is omitted', async () => {
+    const prev = process.env.OFW_INLINE_ATTACHMENTS;
+    process.env.OFW_INLINE_ATTACHMENTS = 'true';
+    try {
+      const client = new OFWClient();
+      const bytes = Buffer.from('env-flipped', 'utf8');
+      vi.spyOn(client, 'request').mockResolvedValueOnce({
+        fileId: 11, fileName: 'memo.txt', label: 'memo.txt',
+        fileType: 'text/plain', fileSize: bytes.length,
+      });
+      vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+        body: bytes, contentType: 'text/plain', suggestedFileName: 'memo.txt',
+      });
+      setup(client);
+
+      // No inline arg — should default to inline because of the env var.
+      const result = await handlers.get('ofw_download_attachment')!({ fileId: 11 });
+      expect(result.content).toHaveLength(2);
+      const meta = JSON.parse(result.content[0].text);
+      expect(meta.mode).toBe('inline');
+      const res = result.content[1];
+      expect(res.type).toBe('resource');
+      expect(Buffer.from(res.resource.blob, 'base64').equals(bytes)).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.OFW_INLINE_ATTACHMENTS;
+      else process.env.OFW_INLINE_ATTACHMENTS = prev;
+    }
+  });
+
+  it('explicit inline:false overrides OFW_INLINE_ATTACHMENTS=true', async () => {
+    const prev = process.env.OFW_INLINE_ATTACHMENTS;
+    process.env.OFW_INLINE_ATTACHMENTS = 'true';
+    try {
+      const client = new OFWClient();
+      vi.spyOn(client, 'request').mockResolvedValueOnce({
+        fileId: 12, fileName: 'memo.txt', label: 'memo.txt',
+        fileType: 'text/plain', fileSize: 4,
+      });
+      vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+        body: Buffer.from('data'), contentType: 'text/plain', suggestedFileName: 'memo.txt',
+      });
+      setup(client);
+      const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+      try {
+        const result = await handlers.get('ofw_download_attachment')!({ fileId: 12, inline: false, saveTo: dir + '/' });
+        const parsed = JSON.parse(result.content[0].text);
+        expect(parsed.path).toMatch(/memo\.txt$/);
+        expect(parsed.mode).toBeUndefined();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    } finally {
+      if (prev === undefined) delete process.env.OFW_INLINE_ATTACHMENTS;
+      else process.env.OFW_INLINE_ATTACHMENTS = prev;
+    }
+  });
+
+  it('inline:true reuses on-disk bytes instead of re-fetching when previously downloaded', async () => {
+    const client = new OFWClient();
+    const bytes = Buffer.from('local-copy', 'utf8');
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 99, fileName: 'note.txt', label: 'note.txt',
+      fileType: 'text/plain', fileSize: bytes.length,
+    });
+    const binSpy = vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      body: bytes, contentType: 'text/plain', suggestedFileName: 'note.txt',
+    });
+    setup(client);
+
+    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    try {
+      // First: disk download populates downloadedPath.
+      await handlers.get('ofw_download_attachment')!({ fileId: 99, saveTo: dir + '/' });
+      // Second: inline mode should read from disk, not hit the network.
+      const result = await handlers.get('ofw_download_attachment')!({ fileId: 99, inline: true });
+      expect(binSpy).toHaveBeenCalledTimes(1);
+      const res = result.content[1];
+      expect(res.type).toBe('resource');
+      expect(Buffer.from(res.resource.blob, 'base64').equals(bytes)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('inline:true falls through to a network fetch when the on-disk copy is missing', async () => {
+    const client = new OFWClient();
+    const bytes = Buffer.from('fresh-bytes', 'utf8');
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 77, fileName: 'gone.txt', label: 'gone.txt',
+      fileType: 'text/plain', fileSize: bytes.length,
+    });
+    const binSpy = vi.spyOn(client, 'requestBinary')
+      .mockResolvedValueOnce({ body: bytes, contentType: 'text/plain', suggestedFileName: 'gone.txt' })
+      .mockResolvedValueOnce({ body: bytes, contentType: 'text/plain', suggestedFileName: 'gone.txt' });
+    setup(client);
+
+    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    try {
+      // Populate downloadedPath in the attachment cache, then delete the actual file.
+      const first = await handlers.get('ofw_download_attachment')!({ fileId: 77, saveTo: dir + '/' });
+      const path = JSON.parse(first.content[0].text).path;
+      rmSync(path);
+
+      // Inline mode should detect the missing file and re-fetch from the network.
+      const result = await handlers.get('ofw_download_attachment')!({ fileId: 77, inline: true });
+      expect(binSpy).toHaveBeenCalledTimes(2);
+      const res = result.content[1];
+      expect(res.type).toBe('resource');
+      expect(Buffer.from(res.resource.blob, 'base64').equals(bytes)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('inline:true falls back to cached mime/filename when the server omits Content-Type/Disposition', async () => {
+    const client = new OFWClient();
+    const bytes = Buffer.from('%PDF-1.4 fake', 'utf8');
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 88, fileName: 'cached.pdf', label: 'cached.pdf',
+      fileType: 'application/pdf', fileSize: bytes.length,
+    });
+    vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      body: bytes, contentType: null, suggestedFileName: null,
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_download_attachment')!({ fileId: 88, inline: true });
+    const meta = JSON.parse(result.content[0].text);
+    expect(meta.mimeType).toBe('application/pdf');
+    expect(meta.fileName).toBe('cached.pdf');
+    const res = result.content[1];
+    expect(res.type).toBe('resource');
+    expect(res.resource.mimeType).toBe('application/pdf');
+    expect(res.resource.uri).toBe('ofw://attachment/88/cached.pdf');
+  });
+
+  it('disk mode falls back to cached mime/filename when the server omits Content-Type/Disposition', async () => {
+    const client = new OFWClient();
+    const bytes = Buffer.from('zipdata', 'utf8');
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 89, fileName: 'archive.zip', label: 'archive.zip',
+      fileType: 'application/zip', fileSize: bytes.length,
+    });
+    vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      body: bytes, contentType: null, suggestedFileName: null,
+    });
+    setup(client);
+
+    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    try {
+      const result = await handlers.get('ofw_download_attachment')!({ fileId: 89, saveTo: dir + '/' });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.mimeType).toBe('application/zip');
+      expect(parsed.fileName).toBe('archive.zip');
+      expect(parsed.path.endsWith('89-archive.zip')).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('skips re-download when the file is already at the same path (no force)', async () => {
     const client = new OFWClient();
     const reqSpy = vi.spyOn(client, 'request').mockResolvedValueOnce({

@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
+import { jsonResponse } from './_shared.js';
 
 export function registerJournalTools(server: McpServer, client: OFWClient): void {
   server.registerTool('ofw_list_journal_entries', {
@@ -15,7 +16,7 @@ export function registerJournalTools(server: McpServer, client: OFWClient): void
     const start = args.start ?? 1;
     const max = args.max ?? 10;
     const data = await client.request('GET', `/pub/v1/journals?start=${start}&max=${max}`);
-    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    return jsonResponse(data);
   });
 
   server.registerTool('ofw_create_journal_entry', {
@@ -27,6 +28,6 @@ export function registerJournalTools(server: McpServer, client: OFWClient): void
     },
   }, async (args) => {
     const data = await client.request('POST', '/pub/v1/journals', args);
-    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    return jsonResponse(data);
   });
 }
