@@ -859,6 +859,63 @@ describe('ofw_download_attachment', () => {
     expect(Buffer.from(res.resource.blob, 'base64').equals(pdfBytes)).toBe(true);
   });
 
+  it('OFW_INLINE_ATTACHMENTS=true makes inline the default when arg is omitted', async () => {
+    const prev = process.env.OFW_INLINE_ATTACHMENTS;
+    process.env.OFW_INLINE_ATTACHMENTS = 'true';
+    try {
+      const client = new OFWClient();
+      const bytes = Buffer.from('env-flipped', 'utf8');
+      vi.spyOn(client, 'request').mockResolvedValueOnce({
+        fileId: 11, fileName: 'memo.txt', label: 'memo.txt',
+        fileType: 'text/plain', fileSize: bytes.length,
+      });
+      vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+        body: bytes, contentType: 'text/plain', suggestedFileName: 'memo.txt',
+      });
+      setup(client);
+
+      // No inline arg — should default to inline because of the env var.
+      const result = await handlers.get('ofw_download_attachment')!({ fileId: 11 });
+      expect(result.content).toHaveLength(2);
+      const meta = JSON.parse(result.content[0].text);
+      expect(meta.mode).toBe('inline');
+      const res = result.content[1];
+      expect(res.type).toBe('resource');
+      expect(Buffer.from(res.resource.blob, 'base64').equals(bytes)).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.OFW_INLINE_ATTACHMENTS;
+      else process.env.OFW_INLINE_ATTACHMENTS = prev;
+    }
+  });
+
+  it('explicit inline:false overrides OFW_INLINE_ATTACHMENTS=true', async () => {
+    const prev = process.env.OFW_INLINE_ATTACHMENTS;
+    process.env.OFW_INLINE_ATTACHMENTS = 'true';
+    try {
+      const client = new OFWClient();
+      vi.spyOn(client, 'request').mockResolvedValueOnce({
+        fileId: 12, fileName: 'memo.txt', label: 'memo.txt',
+        fileType: 'text/plain', fileSize: 4,
+      });
+      vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+        body: Buffer.from('data'), contentType: 'text/plain', suggestedFileName: 'memo.txt',
+      });
+      setup(client);
+      const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+      try {
+        const result = await handlers.get('ofw_download_attachment')!({ fileId: 12, inline: false, saveTo: dir + '/' });
+        const parsed = JSON.parse(result.content[0].text);
+        expect(parsed.path).toMatch(/memo\.txt$/);
+        expect(parsed.mode).toBeUndefined();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    } finally {
+      if (prev === undefined) delete process.env.OFW_INLINE_ATTACHMENTS;
+      else process.env.OFW_INLINE_ATTACHMENTS = prev;
+    }
+  });
+
   it('inline:true reuses on-disk bytes instead of re-fetching when previously downloaded', async () => {
     const client = new OFWClient();
     const bytes = Buffer.from('local-copy', 'utf8');

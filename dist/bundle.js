@@ -31072,6 +31072,11 @@ function getAttachmentsDir() {
   if (override && override.trim().length > 0) return override.trim();
   return join2(homedir(), "Downloads", "ofw-mcp");
 }
+function getDefaultInlineAttachments() {
+  const raw = process.env.OFW_INLINE_ATTACHMENTS;
+  if (typeof raw !== "string") return false;
+  return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
+}
 
 // src/cache.ts
 var instance = null;
@@ -31962,16 +31967,17 @@ ${text}` : text;
     }, null, 2) }] };
   });
   server2.registerTool("ofw_download_attachment", {
-    description: "Download an OFW message attachment by fileId. By default, bytes are saved to disk (~/Downloads/ofw-mcp/) and the response carries the absolute path, mime type, and size for the caller to read back. Pass inline:true to skip disk entirely and return the bytes as MCP content blocks \u2014 images come back as ImageContent (the model sees them directly); other files come back as an EmbeddedResource blob. Use inline for small files where you want the model to read content immediately and the host is sandboxed; use disk for large files or when you want a persistent local copy. fileId comes from attachments[].fileId on ofw_get_message. Override disk destination with OFW_ATTACHMENTS_DIR or saveTo. Re-downloading to the same path is a no-op (disk mode only).",
+    description: 'Download an OFW message attachment by fileId. By default, bytes are saved to disk (~/Downloads/ofw-mcp/) and the response carries the absolute path, mime type, and size for the caller to read back. Pass inline:true to skip disk entirely and return the bytes as MCP content blocks \u2014 images come back as ImageContent (the model sees them directly); other files come back as an EmbeddedResource blob. Use inline for small files where you want the model to read content immediately and the host is sandboxed; use disk for large files or when you want a persistent local copy. The default for `inline` can be flipped server-side via the OFW_INLINE_ATTACHMENTS env var (set to "true" to make inline the default). fileId comes from attachments[].fileId on ofw_get_message. Override disk destination with OFW_ATTACHMENTS_DIR or saveTo. Re-downloading to the same path is a no-op (disk mode only).',
     annotations: { readOnlyHint: false },
     inputSchema: {
       fileId: external_exports.number().describe("Attachment file id (from ofw_get_message \u2192 attachments[].fileId)"),
-      inline: external_exports.boolean().describe("If true, return bytes inline as MCP content (image for image/*, embedded resource blob otherwise) and skip the disk write. Default false (writes to disk).").optional(),
+      inline: external_exports.boolean().describe("If true, return bytes inline as MCP content (image for image/*, embedded resource blob otherwise) and skip the disk write. If false, write to disk and return the path. If omitted, falls back to the OFW_INLINE_ATTACHMENTS env var (default: false = disk).").optional(),
       saveTo: external_exports.string().describe("Absolute path or directory to write to. If a directory, the OFW filename is used. Default: ~/Downloads/ofw-mcp/<fileId>-<filename>. Ignored when inline:true.").optional(),
       force: external_exports.boolean().describe("Re-download even if already on disk. Default false. Ignored when inline:true (inline always fetches fresh bytes, or reuses an on-disk copy if present).").optional()
     }
   }, async (args) => {
     const fileId = args.fileId;
+    const inline = args.inline ?? getDefaultInlineAttachments();
     let cached2 = getAttachment(fileId);
     if (!cached2) {
       const meta3 = await client2.request("GET", `/pub/v1/myfiles/${fileId}`);
@@ -31988,7 +31994,7 @@ ${text}` : text;
       cached2 = getAttachment(fileId);
       if (!cached2) throw new Error(`failed to fetch metadata for fileId ${fileId}`);
     }
-    if (args.inline) {
+    if (inline) {
       let bytes;
       let mimeType;
       let fileName;

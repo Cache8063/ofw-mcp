@@ -32,3 +32,14 @@ export function getAttachmentsDir(): string {
   // location across macOS/Linux/Windows.
   return join(homedir(), 'Downloads', 'ofw-mcp');
 }
+
+// Default for ofw_download_attachment's `inline` arg when the caller doesn't
+// pass one. Set OFW_INLINE_ATTACHMENTS=true to have attachments returned as
+// MCP content blocks by default (skipping disk) — useful on sandboxed MCP
+// hosts where filesystem reads back to the model aren't available.
+// Accepts: "1", "true", "yes", "on" (case-insensitive) → true; anything else → false.
+export function getDefaultInlineAttachments(): boolean {
+  const raw = process.env.OFW_INLINE_ATTACHMENTS;
+  if (typeof raw !== 'string') return false;
+  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+}

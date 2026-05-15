@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getAttachmentsDir, getCacheDbPath } from '../src/config.js';
+import { getAttachmentsDir, getCacheDbPath, getDefaultInlineAttachments } from '../src/config.js';
 
 describe('getCacheDbPath', () => {
   let tmp: string;
@@ -69,5 +69,33 @@ describe('getAttachmentsDir', () => {
   it('honors OFW_ATTACHMENTS_DIR override', () => {
     process.env.OFW_ATTACHMENTS_DIR = '/custom/attachments';
     expect(getAttachmentsDir()).toBe('/custom/attachments');
+  });
+});
+
+describe('getDefaultInlineAttachments', () => {
+  let original: string | undefined;
+
+  beforeEach(() => {
+    original = process.env.OFW_INLINE_ATTACHMENTS;
+    delete process.env.OFW_INLINE_ATTACHMENTS;
+  });
+
+  afterEach(() => {
+    if (original === undefined) delete process.env.OFW_INLINE_ATTACHMENTS;
+    else process.env.OFW_INLINE_ATTACHMENTS = original;
+  });
+
+  it('defaults to false when unset', () => {
+    expect(getDefaultInlineAttachments()).toBe(false);
+  });
+
+  it.each(['true', 'TRUE', 'True', '1', 'yes', 'on', ' true '])('treats %j as true', (val) => {
+    process.env.OFW_INLINE_ATTACHMENTS = val;
+    expect(getDefaultInlineAttachments()).toBe(true);
+  });
+
+  it.each(['false', '0', 'no', 'off', '', 'maybe'])('treats %j as false', (val) => {
+    process.env.OFW_INLINE_ATTACHMENTS = val;
+    expect(getDefaultInlineAttachments()).toBe(false);
   });
 });
