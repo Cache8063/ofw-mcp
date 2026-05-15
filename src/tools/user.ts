@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { OFWClient } from '../client.js';
+import { jsonResponse } from './_shared.js';
 
 export function registerUserTools(server: McpServer, client: OFWClient): void {
   server.registerTool('ofw_get_profile', {
@@ -7,7 +8,7 @@ export function registerUserTools(server: McpServer, client: OFWClient): void {
     annotations: { readOnlyHint: true },
   }, async () => {
     const data = await client.request('GET', '/pub/v2/profiles');
-    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    return jsonResponse(data);
   });
 
   server.registerTool('ofw_get_notifications', {
@@ -16,6 +17,6 @@ export function registerUserTools(server: McpServer, client: OFWClient): void {
     annotations: { readOnlyHint: false },
   }, async () => {
     const data = await client.request('GET', '/pub/v1/users/useraccountstatus');
-    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    return jsonResponse(data);
   });
 }

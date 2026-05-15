@@ -27,11 +27,9 @@ function readVar(key: string): string | undefined {
 
 const BASE_URL = 'https://ofw.ourfamilywizard.com';
 
-const STATIC_HEADERS = {
+const OFW_PROTOCOL_HEADERS = {
   'ofw-client': 'WebApplication',
   'ofw-version': '1.0.0',
-  Accept: 'application/json',
-  'Content-Type': 'application/json',
 } as const;
 
 interface LoginResponse {
@@ -46,74 +44,57 @@ export interface BinaryResponse {
   suggestedFileName: string | null;
 }
 
+// Parse a Content-Disposition header for a filename. Prefers RFC 6266
+// `filename*=UTF-8''…` (percent-decoded) and falls back to `filename="…"`.
+function parseContentDispositionFilename(cd: string): string | null {
+  const extMatch = /filename\*=(?:UTF-8'')?([^;]+)/i.exec(cd);
+  if (extMatch) {
+    const raw = extMatch[1].trim().replace(/^"|"$/g, '');
+    try { return decodeURIComponent(raw); } catch { return raw; }
+  }
+  const m = /filename="?([^";]+)"?/i.exec(cd);
+  return m ? m[1] : null;
+}
+
 export class OFWClient {
   private token: string | null = null;
   private tokenExpiry: Date | null = null;
 
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     await this.ensureAuthenticated();
-    return this.doRequest<T>(method, path, body, false);
+    const response = await this.fetchWithRetry(method, path, body, 'application/json', false);
+    const text = await response.text();
+    return (text ? JSON.parse(text) : null) as T;
   }
 
   /** Like `request`, but returns the raw bytes plus Content-Type/-Disposition metadata. */
   async requestBinary(method: string, path: string): Promise<BinaryResponse> {
     await this.ensureAuthenticated();
-    return this.doRequestBinary(method, path, false);
-  }
-
-  private async doRequestBinary(method: string, path: string, isRetry: boolean): Promise<BinaryResponse> {
-    const headers: Record<string, string> = {
-      'ofw-client': 'WebApplication',
-      'ofw-version': '1.0.0',
-      Accept: 'application/octet-stream',
-      Authorization: `Bearer ${this.token!}`,
-    };
-    const response = await fetch(`${BASE_URL}${path}`, { method, headers });
-    if (response.status === 401 && !isRetry) {
-      this.token = null;
-      this.tokenExpiry = null;
-      await this.ensureAuthenticated();
-      return this.doRequestBinary(method, path, true);
-    }
-    if (response.status === 429 && !isRetry) {
-      await new Promise<void>((r) => setTimeout(r, 2000));
-      return this.doRequestBinary(method, path, true);
-    }
-    if (!response.ok) {
-      throw new Error(`OFW API error: ${response.status} ${response.statusText} for ${method} ${path}`);
-    }
-    const buf = Buffer.from(await response.arrayBuffer());
-    const cd = response.headers.get('content-disposition') ?? '';
-    // RFC 6266: filename*=UTF-8''… takes priority; fall back to filename="…"
-    let suggestedFileName: string | null = null;
-    const extMatch = /filename\*=(?:UTF-8'')?([^;]+)/i.exec(cd);
-    if (extMatch) {
-      try { suggestedFileName = decodeURIComponent(extMatch[1].trim().replace(/^"|"$/g, '')); } catch { suggestedFileName = extMatch[1]; }
-    } else {
-      const m = /filename="?([^";]+)"?/i.exec(cd);
-      if (m) suggestedFileName = m[1];
-    }
+    const response = await this.fetchWithRetry(method, path, undefined, 'application/octet-stream', false);
     return {
-      body: buf,
+      body: Buffer.from(await response.arrayBuffer()),
       contentType: response.headers.get('content-type'),
-      suggestedFileName,
+      suggestedFileName: parseContentDispositionFilename(response.headers.get('content-disposition') ?? ''),
     };
   }
 
-  private async doRequest<T>(
+  // Single fetch+retry scaffold for both JSON and binary callers. Handles
+  // 401 (re-auth and replay once), 429 (wait 2s and replay once), and
+  // turns any other non-2xx into a thrown Error.
+  private async fetchWithRetry(
     method: string,
     path: string,
     body: unknown,
-    isRetry: boolean
-  ): Promise<T> {
+    accept: string,
+    isRetry: boolean,
+  ): Promise<Response> {
     const isFormData = body instanceof FormData;
     const headers: Record<string, string> = {
-      'ofw-client': 'WebApplication',
-      'ofw-version': '1.0.0',
-      Accept: 'application/json',
+      ...OFW_PROTOCOL_HEADERS,
+      Accept: accept,
       Authorization: `Bearer ${this.token!}`,
     };
-    if (!isFormData) headers['Content-Type'] = 'application/json';
+    if (body !== undefined && !isFormData) headers['Content-Type'] = 'application/json';
 
     const response = await fetch(`${BASE_URL}${path}`, {
       method,
@@ -125,25 +106,19 @@ export class OFWClient {
       this.token = null;
       this.tokenExpiry = null;
       await this.ensureAuthenticated();
-      return this.doRequest<T>(method, path, body, true);
+      return this.fetchWithRetry(method, path, body, accept, true);
     }
-
     if (response.status === 429) {
       if (!isRetry) {
         await new Promise<void>((r) => setTimeout(r, 2000));
-        return this.doRequest<T>(method, path, body, true);
+        return this.fetchWithRetry(method, path, body, accept, true);
       }
       throw new Error('Rate limited by OFW API');
     }
-
     if (!response.ok) {
-      throw new Error(
-        `OFW API error: ${response.status} ${response.statusText} for ${method} ${path}`
-      );
+      throw new Error(`OFW API error: ${response.status} ${response.statusText} for ${method} ${path}`);
     }
-
-    const text = await response.text();
-    return (text ? JSON.parse(text) : null) as T;
+    return response;
   }
 
   private async ensureAuthenticated(): Promise<void> {
@@ -161,24 +136,25 @@ export class OFWClient {
     // Spring Security requires a SESSION cookie before accepting the login POST.
     // GET /ofw/login.form with redirect:manual to capture the Set-Cookie from the 303 response.
     const initResponse = await fetch(`${BASE_URL}/ofw/login.form`, {
-      headers: { 'ofw-client': 'WebApplication', 'ofw-version': '1.0.0' },
+      headers: { ...OFW_PROTOCOL_HEADERS },
       redirect: 'manual',
     });
     // Extract just the SESSION=value part (strip attributes like Path, Secure, etc.)
     const setCookie = initResponse.headers.get('set-cookie') ?? '';
-    const sessionCookie = setCookie.split(';')[0]; // split always returns a string; empty string is falsy
+    const sessionCookie = setCookie.split(';')[0];
 
     const response = await fetch(`${BASE_URL}/ofw/login`, {
       method: 'POST',
       headers: {
-        ...STATIC_HEADERS,
+        ...OFW_PROTOCOL_HEADERS,
+        Accept: 'application/json',
         'Content-Type': 'application/x-www-form-urlencoded',
         ...(sessionCookie ? { Cookie: sessionCookie } : {}),
       },
       body: new URLSearchParams({
         submit: 'Sign In',
         _eventId: 'submit',
-        username: username,
+        username,
         password,
       }).toString(),
     });

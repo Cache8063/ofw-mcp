@@ -4,10 +4,10 @@ import {
   upsertMessage, getMessage, setSyncState,
   upsertDraft, getDraft, deleteDraft, listDraftIds,
   upsertAttachmentForMessage,
-  type MessageRow, type Recipient, type DraftRow, type FolderName,
+  type MessageRow, type DraftRow, type FolderName,
 } from './cache.js';
+import { mapRecipients } from './tools/_shared.js';
 
-// ─── Attachment metadata ──────────────────────────────────────────────────────
 // Each OFW message detail returns `files: [fileId, ...]`. We fetch the metadata
 // for each file id (cheap JSON call) so the model can see filenames/mime types
 // without downloading bytes. Bytes are pulled lazily by ofw_download_attachment.
@@ -23,36 +23,37 @@ interface FileMetaResponse {
   lastUpdateDate?: { dateTime?: string };
 }
 
-export async function fetchAndCacheAttachmentMeta(
+// Fetches OFW attachment metadata for one file id and writes it to the cache.
+// Throws on network/HTTP errors — callers in bulk-sync paths wrap this in the
+// best-effort helper below; callers that need the result (download tool) let
+// the throw propagate.
+export async function fetchAttachmentMeta(
   client: OFWClient,
   fileId: number,
-  messageId: number
+  messageId: number,
 ): Promise<void> {
-  try {
-    const meta = await client.request<FileMetaResponse>('GET', `/pub/v1/myfiles/${fileId}`);
-    upsertAttachmentForMessage({
-      fileId: meta.fileId ?? fileId,
-      fileName: meta.fileName ?? `file-${fileId}`,
-      label: meta.label ?? meta.fileName ?? `file-${fileId}`,
-      mimeType: meta.fileType ?? 'application/octet-stream',
-      sizeBytes: typeof meta.fileSize === 'number' ? meta.fileSize : null,
-      metadata: meta,
-      messageId,
-    });
-  } catch {
-    // Attachment metadata failures shouldn't break the surrounding sync.
-    // The file ids stay in the message's listData; the model can retry later
-    // via ofw_download_attachment, which will surface the actual error.
-  }
+  const meta = await client.request<FileMetaResponse>('GET', `/pub/v1/myfiles/${fileId}`);
+  upsertAttachmentForMessage({
+    fileId: meta.fileId ?? fileId,
+    fileName: meta.fileName ?? `file-${fileId}`,
+    label: meta.label ?? meta.fileName ?? `file-${fileId}`,
+    mimeType: meta.fileType ?? 'application/octet-stream',
+    sizeBytes: typeof meta.fileSize === 'number' ? meta.fileSize : null,
+    metadata: meta,
+    messageId,
+  });
 }
 
 export async function fetchAttachmentMetaForMessage(
   client: OFWClient,
   messageId: number,
-  fileIds: number[]
+  fileIds: number[],
 ): Promise<void> {
   for (const fid of fileIds) {
-    await fetchAndCacheAttachmentMeta(client, fid, messageId);
+    // Best-effort: a single bad attachment shouldn't break the surrounding
+    // sync. The file id stays in the message's listData; the model can
+    // retry later via ofw_download_attachment, which surfaces the real error.
+    try { await fetchAttachmentMeta(client, fid, messageId); } catch { /* swallow */ }
   }
 }
 
@@ -111,14 +112,6 @@ export interface MessageSyncResult {
   unread: UnreadHint[];
 }
 
-function recipientsFromList(item: ListItem): Recipient[] {
-  return (item.recipients ?? []).map((r) => ({
-    userId: r.user.id,
-    name: r.user.name,
-    viewedAt: r.viewed?.dateTime ?? null,
-  }));
-}
-
 export async function syncMessageFolder(
   client: OFWClient,
   folder: 'inbox' | 'sent',
@@ -171,7 +164,7 @@ export async function syncMessageFolder(
         subject: item.subject ?? '(no subject)',
         fromUser: item.from?.name ?? '',
         sentAt: item.date?.dateTime ?? new Date().toISOString(),
-        recipients: recipientsFromList(item),
+        recipients: mapRecipients(item.recipients),
         body,
         fetchedBodyAt,
         replyToId: null,
@@ -237,11 +230,7 @@ export async function syncDrafts(client: OFWClient, draftsFolderId: string): Pro
       id: item.id,
       subject: detail.subject ?? item.subject ?? '(no subject)',
       body: detail.body ?? '',
-      recipients: (item.recipients ?? []).map((r) => ({
-        userId: r.user?.id ?? 0,
-        name: r.user?.name ?? '',
-        viewedAt: r.viewed?.dateTime ?? null,
-      })),
+      recipients: mapRecipients(item.recipients),
       replyToId: item.replyToId ?? null,
       modifiedAt,
       listData: item,

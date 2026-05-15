@@ -206,9 +206,11 @@ export interface ListMessagesOptions {
   q?: string;                  // substring match on subject and body (case-insensitive)
 }
 
-export function listMessages(opts: ListMessagesOptions): MessageRow[] {
-  const { db } = openCache();
-  const offset = (opts.page - 1) * opts.size;
+type MessageFilter = Omit<ListMessagesOptions, 'page' | 'size'>;
+
+// Build the WHERE clause + bound params for message queries. listMessages and
+// countMessages share this so the filter semantics can't drift.
+function buildMessageFilter(opts: MessageFilter): { where: string; params: unknown[] } {
   const wheres: string[] = [];
   const params: unknown[] = [];
   if (opts.folder !== undefined) {
@@ -228,38 +230,27 @@ export function listMessages(opts: ListMessagesOptions): MessageRow[] {
     wheres.push('(subject LIKE ? OR body LIKE ?)');
     params.push(pattern, pattern);
   }
-  const where = wheres.length > 0 ? `WHERE ${wheres.join(' AND ')}` : '';
-  params.push(opts.size, offset);
+  return {
+    where: wheres.length > 0 ? `WHERE ${wheres.join(' AND ')}` : '',
+    params,
+  };
+}
+
+export function listMessages(opts: ListMessagesOptions): MessageRow[] {
+  const { db } = openCache();
+  const { where, params } = buildMessageFilter(opts);
+  const offset = (opts.page - 1) * opts.size;
   const rows = db.prepare(
     `SELECT * FROM messages ${where}
      ORDER BY sent_at DESC, id DESC
      LIMIT ? OFFSET ?`
-  ).all(...params as never[]) as unknown as MessageDbRow[];
+  ).all(...params as never[], opts.size, offset) as unknown as MessageDbRow[];
   return rows.map(rowFromDb);
 }
 
-export function countMessages(opts: Omit<ListMessagesOptions, 'page' | 'size'>): number {
+export function countMessages(opts: MessageFilter): number {
   const { db } = openCache();
-  const wheres: string[] = [];
-  const params: unknown[] = [];
-  if (opts.folder !== undefined) {
-    wheres.push('folder = ?');
-    params.push(opts.folder);
-  }
-  if (opts.since !== undefined) {
-    wheres.push('sent_at >= ?');
-    params.push(opts.since);
-  }
-  if (opts.until !== undefined) {
-    wheres.push('sent_at < ?');
-    params.push(opts.until);
-  }
-  if (opts.q !== undefined && opts.q.length > 0) {
-    const pattern = `%${opts.q}%`;
-    wheres.push('(subject LIKE ? OR body LIKE ?)');
-    params.push(pattern, pattern);
-  }
-  const where = wheres.length > 0 ? `WHERE ${wheres.join(' AND ')}` : '';
+  const { where, params } = buildMessageFilter(opts);
   const r = db.prepare(`SELECT COUNT(*) as n FROM messages ${where}`)
     .get(...params as never[]) as { n: number } | undefined;
   return r?.n ?? 0;

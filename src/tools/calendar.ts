@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
+import { jsonResponse, textResponse } from './_shared.js';
 
 export function registerCalendarTools(server: McpServer, client: OFWClient): void {
   server.registerTool('ofw_list_events', {
@@ -17,7 +18,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
       'GET',
       `/pub/v1/calendar/${variant}?startDate=${encodeURIComponent(args.startDate)}&endDate=${encodeURIComponent(args.endDate)}`
     );
-    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    return jsonResponse(data);
   });
 
   server.registerTool('ofw_create_event', {
@@ -38,7 +39,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
     },
   }, async (args) => {
     const data = await client.request('POST', '/pub/v1/calendar/events', args);
-    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    return jsonResponse(data);
   });
 
   server.registerTool('ofw_update_event', {
@@ -57,7 +58,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
   }, async (args) => {
     const { eventId, ...updateData } = args;
     const data = await client.request('PUT', `/pub/v1/calendar/events/${encodeURIComponent(eventId)}`, updateData);
-    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    return jsonResponse(data);
   });
 
   server.registerTool('ofw_delete_event', {
@@ -68,6 +69,6 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
     },
   }, async (args) => {
     await client.request('DELETE', `/pub/v1/calendar/events/${encodeURIComponent(args.eventId)}`);
-    return { content: [{ type: 'text' as const, text: `Event ${args.eventId} deleted` }] };
+    return textResponse(`Event ${args.eventId} deleted`);
   });
 }
