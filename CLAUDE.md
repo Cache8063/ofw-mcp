@@ -98,7 +98,7 @@ Driven by **release-please** (`googleapis/release-please-action@v4`). Authoritat
 - `.claude-plugin/plugin.json` — `$.version`
 - `.claude-plugin/marketplace.json` — `$.plugins[*].version` and `$.metadata.version`
 
-If you add a new file with a `version` field, register it in `release-please-config.json`. `release.yml` has an assertion step that fails the publish job if any registered file drifts from `package.json` — so an un-registered file would silently drift until the next release, at which point the guard catches it.
+If you add a new file with a `version` field, register it in `release-please-config.json`. Otherwise it silently drifts — release-please trusts its own bump logic, and there's no in-workflow guard.
 
 ### Important
 
@@ -106,14 +106,16 @@ Do NOT manually bump versions or create tags. Conventional-commit PR titles tell
 
 ### Release workflow
 
-Main is always at the latest released version (not "one ahead" — that was the old `tag-and-bump` model). The loop is fully driven by `release-please`:
+Main is always at the latest released version (not "one ahead" — that was the old `tag-and-bump` model). The whole loop lives in `.github/workflows/release-please.yml`:
 
-1. **release-please.yml** runs on every push to main. When it sees commits since the last release that warrant a bump, it opens (or updates) a release PR titled `chore: release v<NEXT>`, bumps every file in `extra-files`, and writes the new entry into `CHANGELOG.md`. The PR is auto-labeled `ready-to-merge` (via a follow-up `gh pr edit --add-label` step, using `RELEASE_PAT` so the `labeled` event actually fires).
-2. **auto-merge.yml** (`arm-on-ready-label`) sees the label and calls `gh pr merge --auto --merge` via `RELEASE_PAT`. CI gates the merge.
-3. When the release PR merges, `release-please-action` runs again on the new main push, creates the `v<NEXT>` tag, and creates a GitHub Release with the CHANGELOG section as the body.
-4. The tag push (using `RELEASE_PAT`) fires **release.yml**: asserts all version files match the tag (defensive — should always pass), builds + packages the `.mcpb` bundle and `.skill` archive, publishes to npm (provenance, idempotent), the MCP Registry (OIDC), and ClawHub (gated on `secrets.CLAWHUB_TOKEN`), then attaches the `.mcpb` and `.skill` to the existing release via `gh release upload --clobber`.
+1. **release-please-action runs** on every push to main. When it sees commits since the last release that warrant a bump, it opens (or updates) a release PR titled `chore: release v<NEXT>`, bumps every file in `extra-files`, and writes the new entry into `CHANGELOG.md`.
+2. **The release PR sits open as your review gate.** Look at the proposed CHANGELOG. When you're ready to ship, either merge it via the GitHub UI, or add the `ready-to-merge` label and `auto-merge.yml` will arm `gh pr merge --auto`. CI gates the merge either way.
+3. When the release PR merges, **release-please-action runs again** on the new push, creates the `v<NEXT>` tag, and creates a GitHub Release with the CHANGELOG section as the body. Its `release_created` output flips to `true`.
+4. **The `publish` job** in the same workflow runs (gated on `needs.release-please.outputs.release_created == 'true'`): checks out the tag, builds and packages the `.mcpb` bundle and `.skill` archive, publishes to npm (provenance, idempotent), the MCP Registry (OIDC), and ClawHub (gated on `secrets.CLAWHUB_TOKEN`), then attaches the `.mcpb` and `.skill` to the existing release via `gh release upload --clobber`.
 
 To skip a release temporarily, close release-please's PR — it'll re-open with more content the next time something warrants a bump. To force a release for content release-please thinks doesn't warrant one, see release-please's `release-as` / `--release-as` options.
+
+Recovery from a flaky publish step: re-run the failed `release-please.yml` workflow run from the GitHub Actions UI. The publish job's npm step is idempotent (skips if already published); MCP Registry publish is idempotent in practice; `gh release upload --clobber` overwrites any prior uploads.
 
 The branch-and-PR shape is still required because `main` is protected by the *main protection (PR + ci)* ruleset.
 
