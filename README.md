@@ -18,7 +18,7 @@ Ask Claude things like:
 ## Requirements
 
 - [Claude Desktop](https://claude.ai/download)
-- [Node.js](https://nodejs.org) 18 or later
+- [Node.js](https://nodejs.org) 22.5 or later (`node:sqlite` is the cache backend)
 - An active OurFamilyWizard account
 
 ## Installation
