@@ -10,12 +10,7 @@
 // `resolveAuth()` in `./auth.ts` can call it without a Client instance, and
 // so tests can mock it at the module boundary.
 
-const BASE_URL = 'https://ofw.ourfamilywizard.com';
-
-const OFW_PROTOCOL_HEADERS = {
-  'ofw-client': 'WebApplication',
-  'ofw-version': '1.0.0',
-} as const;
+import { BASE_URL, OFW_PROTOCOL_HEADERS } from './protocol.js';
 
 interface LoginResponse {
   auth: string;

@@ -2,6 +2,7 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { resolveAuth } from './auth.js';
 import { parseBoolEnv } from './config.js';
+import { BASE_URL, OFW_PROTOCOL_HEADERS } from './protocol.js';
 
 // Load .env for local dev; silently skip if dotenv is unavailable (e.g. mcpb bundle)
 try {
@@ -11,13 +12,6 @@ try {
 } catch {
   // not available — rely on process.env (mcpb sets credentials via mcp_config.env)
 }
-
-const BASE_URL = 'https://ofw.ourfamilywizard.com';
-
-const OFW_PROTOCOL_HEADERS = {
-  'ofw-client': 'WebApplication',
-  'ofw-version': '1.0.0',
-} as const;
 
 export interface BinaryResponse {
   body: Buffer;
