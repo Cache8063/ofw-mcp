@@ -26,8 +26,8 @@ name: Auto-merge PRs
 # RELEASE_PAT (not GITHUB_TOKEN) is used to arm `gh pr merge --auto`.
 # GitHub suppresses workflow runs for events triggered by GITHUB_TOKEN
 # to prevent loops; with the PAT, the merge it eventually performs
-# fires `push` events on main, which is what tag-on-release-merge.yml
-# listens on.
+# fires `push` events on main, which is what release-please.yml
+# listens on (to open / tag / publish the next release).
 
 on:
   pull_request_target:

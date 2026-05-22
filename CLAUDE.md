@@ -117,10 +117,10 @@ To skip a release temporarily, close release-please's PR — it'll re-open with 
 
 The branch-and-PR shape is still required because `main` is protected by the *main protection (PR + ci)* ruleset.
 
-<!-- pr-workflow:v3 -->
+<!-- pr-workflow:v4 -->
 ## Pull requests & release notes
 
-**Default workflow: branch + PR. Direct pushes to `main` are blocked by branch protection** (required status check `ci`, required PR flow, admin enforcement on). The PR mechanism is also the only way release notes get generated — `generate_release_notes` (configured in `.github/release.yml`) picks up merged PRs.
+**Default workflow: branch + PR. Direct pushes to `main` are blocked by the *main protection (PR + ci)* ruleset.** The PR mechanism is also how release-please learns what's queued: every merged PR's conventional-commit prefixes (`fix:`, `feat:`, etc.) drive both the next version bump and the CHANGELOG section.
 
 PR handling is **source-aware**:
 
@@ -141,24 +141,25 @@ Verdict semantics (Claude follows the official `code-review` plugin's severity m
 
 Override: if you want to merge through a `warn` or `fail`, add `ready-to-merge` by hand — it still arms auto-merge. To suppress auto-merge on a `pass`, remove the label or close-and-reopen the PR draft.
 
-For every PR, apply exactly one label so it lands in the right release-notes section:
+PR titles use conventional-commit prefixes — release-please reads them to pick the next version and to write the CHANGELOG entry (see [Conventional Commits](https://www.conventionalcommits.org/)):
 
-| Label                | Section in release notes |
-|----------------------|--------------------------|
-| `enhancement`        | Features                 |
-| `bug`                | Bug Fixes                |
-| `security`           | Security                 |
-| `refactor`           | Refactor                 |
-| `documentation`      | Documentation            |
-| `test`               | Tests                    |
-| `dependencies`       | Dependencies             |
-| `ci` / `github_actions` | CI & Build            |
-| *(none / unmatched)* | Other Changes            |
-| `ignore-for-release` | Hidden from notes        |
+| Prefix       | Bumps    | CHANGELOG section            |
+|--------------|----------|------------------------------|
+| `feat:`      | minor    | Features                     |
+| `fix:`       | patch    | Bug Fixes                    |
+| `perf:`      | patch    | Performance                  |
+| `revert:`    | patch    | Reverts                      |
+| `refactor:`  | none     | Refactor                     |
+| `docs:`      | none     | Documentation                |
+| `test:`      | none     | hidden                       |
+| `build:`     | none     | hidden                       |
+| `ci:`        | none     | hidden                       |
+| `chore:`     | none     | hidden                       |
+| `feat!:` / `BREAKING CHANGE:` | major | Features (with ⚠ marker) |
 
-The **PR title** becomes the bullet — write it like a user-facing changelog entry (`ofw_sync_messages: resume from saved cursor`), not internal shorthand (`sync tweaks`). Conventional-commit prefixes (`feat:`, `fix:`, `chore:`) are still fine in commit messages, but the PR title should read clean.
+The bullet text in the CHANGELOG is the part after the prefix — write it like a user-facing changelog entry (`ofw_sync_messages: resume from saved cursor`), not internal shorthand (`sync tweaks`).
 
-Open with `gh pr create --label <label>` (or `--label ignore-for-release` for chores not worth a line). You generally don't need to pre-add `ready-to-merge` anymore — let Claude's review verdict do it. If you want to skip the review (e.g. for a trivial chore you've eyeballed yourself), add `ready-to-merge` at PR-create time and it'll arm immediately. Dependabot PRs auto-arm without `ready-to-merge`. The repo blocks squash merges (rebase is allowed at the repo level but unused — every workflow calls `gh pr merge --merge` so all PRs land as merge commits); if you call `gh pr merge` manually, don't pass `--squash` or the call will fail.
+Open with `gh pr create`; you don't need any labels. Let Claude's review verdict add `ready-to-merge` for you. If you want to skip the review on a trivial chore, add `--label ready-to-merge` at PR-create time and it'll arm immediately. Dependabot PRs auto-arm without it. The repo blocks squash merges (rebase is allowed at the repo level but unused — every workflow calls `gh pr merge --merge` so all PRs land as merge commits); if you call `gh pr merge` manually, don't pass `--squash` or the call will fail.
 
 `main` is protected by two rulesets: *Block force-push and deletion on main* and *main protection (PR + ci)* — the latter requires every change to go through a PR and `ci` to pass (strict mode = branch must be up-to-date with main). No bypass actors; admins are not exempt. See `gh api /repos/chrischall/ofw-mcp/rulesets` to inspect.
 
