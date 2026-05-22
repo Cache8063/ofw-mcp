@@ -1,13 +1,15 @@
 name: PR auto-review
 
-# On every non-draft PR from the repo owner, apply the `auto-review` label
-# and trigger automated review from Claude (via @claude mention) and from
-# GitHub Copilot (via the reviewer-request API).
+# On every non-draft PR from a human (owner OR other collaborators), apply
+# the `auto-review` label and trigger automated review from Claude (via
+# @claude mention) and from GitHub Copilot (via the reviewer-request API).
 #
-# Mirrors auto-merge.yml's scope: owner PRs only, so dependabot/renovate
-# PRs aren't pinged. pull_request_target is used (not pull_request) so the
-# workflow has write permissions on the repo even when a future fork PR
-# slips through — we never check out PR code, only call the API.
+# Bot-authored PRs (dependabot/renovate/etc.) are skipped — those go
+# straight to CI + auto-merge without per-PR review noise.
+#
+# pull_request_target is used (not pull_request) so the workflow has
+# write permissions on the repo even when a future fork PR slips
+# through — we never check out PR code, only call the API.
 
 on:
   pull_request_target:
@@ -27,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     if: |
       github.event.pull_request.draft == false &&
-      github.event.pull_request.user.login == github.repository_owner
+      github.event.pull_request.user.type == 'User'
     steps:
       - name: Apply auto-review label
         env:

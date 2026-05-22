@@ -118,7 +118,17 @@ The branch-and-PR shape is required because `main` is protected: direct pushes a
 
 **Default workflow: branch + PR. Direct pushes to `main` are blocked by branch protection** (required status check `ci`, required PR flow, admin enforcement on). The PR mechanism is also the only way release notes get generated — `generate_release_notes` (configured in `.github/release.yml`) picks up merged PRs.
 
-Every owner PR is auto-labeled `auto-review` by `pr-auto-review.yml`, which also posts an `@claude` review comment and requests GitHub Copilot as a reviewer. Reviews are informational — the auto-merge path (`auto-merge.yml`) lands the PR as soon as CI is green, without waiting for review approvals.
+PR handling is **source-aware**:
+
+| PR author              | `auto-review` (label, @claude, Copilot) | Auto-merge                                              |
+|------------------------|------------------------------------------|---------------------------------------------------------|
+| **You (owner)**        | Yes                                      | Only after you add the **`ready-to-merge`** label       |
+| **Other humans**       | Yes                                      | No — you merge manually after reviewing                 |
+| **Dependabot / bots**  | No (skipped to keep noise down)          | Yes, armed immediately; merges when CI is green         |
+
+`pr-auto-review.yml` fires on any PR whose author is type `User` (so it includes both you and any future collaborators). `auto-merge.yml` is split into two jobs: one arms on dependabot PR open, the other arms on owner PRs only when the `ready-to-merge` label is added. Other-human PRs never auto-arm — you decide when to land them.
+
+Workflow for your own PRs: open the PR → it gets auto-labeled and reviewed → skim the `@claude` comment and the Copilot review → add `ready-to-merge` when you're satisfied → CI green → merges. If reviewers flag something, push fixes; CI restarts; once you re-add `ready-to-merge` (if it was dismissed) auto-merge re-arms.
 
 For every PR, apply exactly one label so it lands in the right release-notes section:
 
@@ -137,7 +147,7 @@ For every PR, apply exactly one label so it lands in the right release-notes sec
 
 The **PR title** becomes the bullet — write it like a user-facing changelog entry (`ofw_sync_messages: resume from saved cursor`), not internal shorthand (`sync tweaks`). Conventional-commit prefixes (`feat:`, `fix:`, `chore:`) are still fine in commit messages, but the PR title should read clean.
 
-Open with `gh pr create --label <label>` (or `--label ignore-for-release` for chores not worth a line). `auto-merge.yml` arms `--auto --merge` on every owner / dependabot PR automatically, so you don't need to run `gh pr merge` yourself. The repo allows merge commits only (no squash, no rebase) — if you ever do call `gh pr merge` manually, don't pass `--squash`/`--rebase` or the call will fail.
+Open with `gh pr create --label <label>` (or `--label ignore-for-release` for chores not worth a line). For your own PRs, add `--label ready-to-merge` if you already want it to auto-merge as soon as CI passes — otherwise add the label later through the GitHub UI once you've read the auto-review feedback. Dependabot PRs auto-arm without `ready-to-merge`. The repo allows merge commits only (no squash, no rebase) — if you ever do call `gh pr merge` manually, don't pass `--squash`/`--rebase` or the call will fail.
 
 ## Plugin / Distribution
 
