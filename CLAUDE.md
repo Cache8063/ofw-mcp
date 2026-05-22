@@ -67,7 +67,7 @@ The split into `auth.ts` + `auth-password.ts` is deliberate: tests mock `auth-pa
 
 - SQLite at `~/.cache/ofw-mcp/<sha256(OFW_USERNAME).slice(0,16)>.db`. Requires Node ≥22.5 for `node:sqlite` (an `ExperimentalWarning` for SQLite is suppressed in `src/index.ts`)
 - All message reads (`ofw_list_messages`, `ofw_get_message`, `ofw_list_drafts`, `ofw_get_unread_sent`) are served from the cache. `ofw_sync_messages` is the only path that walks OFW for new content
-- `ofw_send_message` and `ofw_save_draft` resolve `replyToId` to the latest sent reply in the same chain via the cache (transparency note included in the response when rewritten); the new sent/draft row is written through to the cache after the OFW POST succeeds
+- `ofw_send_message` and `ofw_save_draft` resolve `replyToId` to the latest sent reply in the same chain via the cache (transparency note included in the response when rewritten); after the OFW POST succeeds they immediately `GET /pub/v3/messages/{id}` to repopulate the cache from authoritative state. (OFW's POST response is minimal — typically `{entityId: X}` — and can silently no-op on draft updates, so we don't trust it.) `ofw_save_draft` additionally emits a `WARNING` note when updating and the persisted body doesn't match what was requested.
 - Drafts folder ID is resolved dynamically via `/pub/v1/messageFolders` and persisted in the `meta` table
 
 ## OFW API Notes
@@ -167,7 +167,7 @@ skills/ofw/SKILL.md Claude Code skill describing when/how to use the tools
 - **ESM + NodeNext**: imports must use `.js` extensions even for `.ts` sources (e.g. `import { client } from './client.js'`)
 - **Node ≥22.5 required**: `node:sqlite` is the cache backend. The startup `ExperimentalWarning` for SQLite is suppressed by a `process.emit` shim at the top of `src/index.ts`
 - **stdio transport**: stdout is reserved for JSON-RPC. All logging goes to **stderr** (`console.error`). `dotenv` is loaded inside a try/catch and the entry point shim filters warnings
-- **Cache write-through**: write tools (`ofw_send_message`, `ofw_save_draft`, `ofw_delete_draft`) update the local cache after the OFW POST succeeds, so the next read sees the new row without resyncing
+- **Cache refresh from GET**: `ofw_send_message` and `ofw_save_draft` GET `/pub/v3/messages/{id}` after the POST returns and populate the cache from the detail response — OFW's POST response is minimal (typically `{entityId: X}`) and can silently no-op on subsequent draft updates, so we don't trust the POST echo. `ofw_delete_draft` updates the cache directly after the OFW DELETE succeeds (no GET needed)
 - **replyToId rewriting**: send/save_draft transparently re-target stale `replyToId`s to the latest sent reply in the chain (via `findLatestReplyTip`) and include a transparency note in the response
 - **Attachment download paths**: in sandboxed MCP hosts (Claude Desktop) the model often can't read files written under `~/.cache`. Default download dir is `~/Downloads/ofw-mcp/`; set `OFW_INLINE_ATTACHMENTS=true` (or per-call `inline: true`) to return bytes as MCP content blocks instead
 - **AI-maintained**: README warns this codebase is built and maintained by Claude; `src/index.ts` prints the same notice to stderr on startup
