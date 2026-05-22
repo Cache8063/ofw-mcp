@@ -155,7 +155,9 @@ For every PR, apply exactly one label so it lands in the right release-notes sec
 
 The **PR title** becomes the bullet — write it like a user-facing changelog entry (`ofw_sync_messages: resume from saved cursor`), not internal shorthand (`sync tweaks`). Conventional-commit prefixes (`feat:`, `fix:`, `chore:`) are still fine in commit messages, but the PR title should read clean.
 
-Open with `gh pr create --label <label>` (or `--label ignore-for-release` for chores not worth a line). You generally don't need to pre-add `ready-to-merge` anymore — let Claude's review verdict do it. If you want to skip the review (e.g. for a trivial chore you've eyeballed yourself), add `ready-to-merge` at PR-create time and it'll arm immediately. Dependabot PRs auto-arm without `ready-to-merge`. The repo allows merge commits only (no squash, no rebase) — if you ever do call `gh pr merge` manually, don't pass `--squash`/`--rebase` or the call will fail.
+Open with `gh pr create --label <label>` (or `--label ignore-for-release` for chores not worth a line). You generally don't need to pre-add `ready-to-merge` anymore — let Claude's review verdict do it. If you want to skip the review (e.g. for a trivial chore you've eyeballed yourself), add `ready-to-merge` at PR-create time and it'll arm immediately. Dependabot PRs auto-arm without `ready-to-merge`. The repo blocks squash merges (rebase is allowed at the repo level but unused — every workflow calls `gh pr merge --merge` so all PRs land as merge commits); if you call `gh pr merge` manually, don't pass `--squash` or the call will fail.
+
+`main` is protected by two rulesets: *Block force-push and deletion on main* and *main protection (PR + ci)* — the latter requires every change to go through a PR and `ci` to pass (strict mode = branch must be up-to-date with main). No bypass actors; admins are not exempt. See `gh api /repos/chrischall/ofw-mcp/rulesets` to inspect.
 
 ## Plugin / Distribution
 
