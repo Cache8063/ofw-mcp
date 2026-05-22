@@ -219,6 +219,20 @@ describe('drafts CRUD', () => {
   });
 });
 
+describe('upsertMessage NOT-NULL guards', () => {
+  it('throws with the field name when subject is undefined', () => {
+    expect(() => upsertMessage(sampleRow({ subject: undefined as unknown as string }))).toThrow(
+      /messages\.subject is required \(got undefined\)/,
+    );
+  });
+
+  it('throws with the field name when fromUser is null', () => {
+    expect(() => upsertMessage(sampleRow({ fromUser: null as unknown as string }))).toThrow(
+      /messages\.fromUser is required \(got null\)/,
+    );
+  });
+});
+
 describe('sync_state and meta', () => {
   it('getSyncState returns null for unknown folder', () => {
     openCache();
