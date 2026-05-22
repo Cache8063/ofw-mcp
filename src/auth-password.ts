@@ -10,7 +10,7 @@
 // `resolveAuth()` in `./auth.ts` can call it without a Client instance, and
 // so tests can mock it at the module boundary.
 
-import { BASE_URL, OFW_PROTOCOL_HEADERS } from './protocol.js';
+import { BASE_URL, OFW_PROTOCOL_HEADERS, OFW_TOKEN_TTL_MS } from './protocol.js';
 
 interface LoginResponse {
   auth: string;
@@ -64,9 +64,6 @@ export async function loginWithPassword(
   const data = (await response.json()) as LoginResponse;
   return {
     token: data.auth,
-    // OFW's login endpoint omits expiry. 6h is the empirical TTL and matches
-    // the historical behavior of this client (a single 401 → re-auth + replay
-    // covers the edge case where this estimate is wrong).
-    expiresAt: new Date(Date.now() + 6 * 60 * 60 * 1000),
+    expiresAt: new Date(Date.now() + OFW_TOKEN_TTL_MS),
   };
 }
