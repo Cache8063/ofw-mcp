@@ -47,6 +47,7 @@
 //     selection logic independent of either implementation.
 
 import { bootstrap } from '@fetchproxy/bootstrap';
+import { classifyBridgeError, FetchproxyBridgeDownError } from '@fetchproxy/server';
 import { loginWithPassword } from './auth-password.js';
 import { parseBoolEnv } from './config.js';
 import pkg from '../package.json' with { type: 'json' };
@@ -134,6 +135,13 @@ export async function resolveAuth(): Promise<ResolvedAuth> {
         source: 'fetchproxy',
       };
     } catch (e) {
+      // FetchproxyBridgeDownError only escapes bootstrap() after the lazy-revive retry fails — surface .hint verbatim (actionable "click toolbar icon" copy).
+      if (classifyBridgeError(e) === 'bridge_down') {
+        const downErr = e as FetchproxyBridgeDownError;
+        throw new Error(
+          `OFW auth: fetchproxy bridge is down (extension service worker unreachable after retry). ${downErr.hint}`,
+        );
+      }
       const msg = e instanceof Error ? e.message : String(e);
       throw new Error(
         `OFW auth: no OFW_USERNAME/OFW_PASSWORD set, and fetchproxy fallback failed: ${msg}`,
