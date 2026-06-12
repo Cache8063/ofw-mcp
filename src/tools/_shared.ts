@@ -33,6 +33,32 @@ export function mapRecipients(items: ApiRecipient[] | undefined | null): Recipie
 export const expandPath = expandPathUtil;
 
 /**
+ * Best-effort check that OFW actually persisted what we posted. OFW's
+ * draft-update path is known to silently no-op while echoing success in the
+ * POST response, so callers re-GET the detail and compare it to what was
+ * sent. Containment (not equality) because OFW legitimately transforms
+ * content — replies get the original message appended to the body
+ * (includeOriginal) and may get a subject prefix. Returns a WARNING string
+ * when the persisted content can't be confirmed to contain what was sent,
+ * else null.
+ */
+export function verifyWriteLanded(
+  kind: 'message' | 'draft',
+  sent: { subject: string; body: string },
+  persisted: { subject?: string; body?: string },
+): string | null {
+  const mismatches: string[] = [];
+  if (typeof persisted.subject !== 'string' || !persisted.subject.includes(sent.subject)) {
+    mismatches.push('subject');
+  }
+  if (typeof persisted.body !== 'string' || !persisted.body.includes(sent.body)) {
+    mismatches.push('body');
+  }
+  if (mismatches.length === 0) return null;
+  return `WARNING: the ${kind} re-fetched from OFW does not contain the ${mismatches.join(' and ')} that was posted — OFW may have silently dropped or altered the write. Verify the ${kind} on ourfamilywizard.com before relying on it.`;
+}
+
+/**
  * POST a payload to /pub/v3/messages, then immediately GET the detail
  * endpoint for the resulting message id. This is the only correct way to
  * populate the cache after `ofw_send_message` or `ofw_save_draft`:
