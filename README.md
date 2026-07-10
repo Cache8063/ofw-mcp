@@ -159,11 +159,30 @@ The "Confirm" permission above is a *hint* to the MCP host — a host configured
 
 | `OFW_WRITE_MODE` | What's available |
 |------------------|------------------|
-| `none` | Read/sync/search only. No write tools exist. |
+| `none` | **The default in this fork.** Read/sync/search only. No write tools exist. |
 | `drafts` | Adds draft-level writes: `ofw_save_draft`, `ofw_delete_draft`, `ofw_upload_attachment`. Nothing that lands on the court-visible record — the AI prepares, only a human signed into the OFW web UI can send. |
-| `all` | Everything (the default — fully backward compatible). |
+| `all` | Everything (send, calendar/expense/journal writes). |
 
 Unrecognized values fail closed to `none`, with a warning on stderr — a typo never silently grants write access.
+
+> **Fork note.** This fork defaults to `none` (fail-safe). Because OFW is a court-of-record platform, a fresh install can't send a message or mutate the record until you deliberately set `OFW_WRITE_MODE=drafts` or `all`. Upstream defaults to `all` for backward compatibility.
+
+### Cache encryption (`OFW_CACHE_KEY`)
+
+The local SQLite cache holds a full copy of your co-parenting message history. By default it's stored as plaintext (with the dir/file locked to `0700`/`0600`), which is exposed to any backup or sync agent that reaches `~/.cache/ofw-mcp/`. Set `OFW_CACHE_KEY` to encrypt the content columns at rest:
+
+```bash
+OFW_CACHE_KEY=$(openssl rand -base64 32)
+```
+
+- **What's encrypted:** message/draft subject + body + recipients + list payloads, and attachment names/metadata — AES-256-GCM, unique IV per field. Ids, folders, and timestamps stay plaintext so the DB stays queryable/sortable.
+- **Search still works.** With a key set, `ofw_list_messages`'s text query can't run as SQL `LIKE` over ciphertext, so it decrypts the folder/date-filtered candidate set in memory and substring-matches there. Correct, slightly slower on very large caches.
+- **Backward compatible.** No key = current plaintext behavior. Turning the key on leaves existing plaintext rows readable; they migrate to ciphertext as they're re-synced.
+- **Keep the key OUTSIDE the cache dir** (an exported env var / a secrets file). A key stored next to the DB gets backed up alongside it and defeats the purpose. Also keep excluding `~/.cache/ofw-mcp/` from Time Machine / cloud backup — defense in depth.
+
+### Egress allowlist
+
+Every outbound request is passed through a hard host check before `fetch` — the server refuses to contact any host other than `ofw.ourfamilywizard.com` (including URL userinfo-splice tricks). It's a structural backstop: a future code change or a compromised dependency that tried to reach another host throws instead of exfiltrating your bearer token or messages.
 
 ## Troubleshooting
 
@@ -185,6 +204,8 @@ Unrecognized values fail closed to `none`, with a warning on stderr — a typo n
 - They are passed to the server as environment variables and never logged
 - The server authenticates with OFW using the same login flow as the web app
 - Use a strong, unique OFW password
+- Outbound requests are host-allowlisted to `ofw.ourfamilywizard.com` (see [Egress allowlist](#egress-allowlist))
+- Set `OFW_CACHE_KEY` to encrypt the message cache at rest (see [Cache encryption](#cache-encryption-ofw_cache_key)); this fork also defaults `OFW_WRITE_MODE` to fail-safe `none`
 
 ## Development
 

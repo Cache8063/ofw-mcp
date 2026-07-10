@@ -45,12 +45,18 @@ function setupWithClient(client: OFWClient): Map<string, ToolHandler> {
   return localHandlers;
 }
 
+let originalWriteMode: string | undefined;
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'ofw-tools-'));
   originalCacheDir = process.env.OFW_CACHE_DIR;
   originalUsername = process.env.OFW_USERNAME;
+  originalWriteMode = process.env.OFW_WRITE_MODE;
   process.env.OFW_CACHE_DIR = tmpDir;
   process.env.OFW_USERNAME = 'test@example.com';
+  // The default is now fail-safe 'none'; these tests exercise the full write
+  // surface, so opt into 'all'. The OFW_WRITE_MODE gating describe below
+  // overrides per-test and restores.
+  process.env.OFW_WRITE_MODE = 'all';
 });
 
 afterEach(() => {
@@ -60,6 +66,8 @@ afterEach(() => {
   else process.env.OFW_CACHE_DIR = originalCacheDir;
   if (originalUsername === undefined) delete process.env.OFW_USERNAME;
   else process.env.OFW_USERNAME = originalUsername;
+  if (originalWriteMode === undefined) delete process.env.OFW_WRITE_MODE;
+  else process.env.OFW_WRITE_MODE = originalWriteMode;
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -1879,16 +1887,24 @@ describe('OFW_WRITE_MODE gating', () => {
     expect(handlers.has('ofw_upload_attachment')).toBe(true);
   });
 
-  it('mode "all" (and unset) registers everything', () => {
+  it('mode "all" registers everything', () => {
     process.env.OFW_WRITE_MODE = 'all';
-    setup(makeClient({}));
-    expect(handlers.has('ofw_send_message')).toBe(true);
-    delete process.env.OFW_WRITE_MODE;
     setup(makeClient({}));
     expect(handlers.has('ofw_send_message')).toBe(true);
     expect(handlers.has('ofw_save_draft')).toBe(true);
     expect(handlers.has('ofw_delete_draft')).toBe(true);
     expect(handlers.has('ofw_upload_attachment')).toBe(true);
+  });
+
+  it('unset defaults to fail-safe "none" — no write tools', () => {
+    delete process.env.OFW_WRITE_MODE;
+    setup(makeClient({}));
+    expect(handlers.has('ofw_send_message')).toBe(false);
+    expect(handlers.has('ofw_save_draft')).toBe(false);
+    expect(handlers.has('ofw_delete_draft')).toBe(false);
+    expect(handlers.has('ofw_upload_attachment')).toBe(false);
+    // reads remain
+    expect(handlers.has('ofw_list_messages')).toBe(true);
   });
 });
 

@@ -2,6 +2,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, chmodSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { getCacheDbPath } from './config.js';
+import {
+  encryptField, decryptField, encryptNullable, decryptNullable, isCacheEncryptionEnabled,
+} from './cache-crypto.js';
 
 export interface Cache {
   db: DatabaseSync;
@@ -145,19 +148,22 @@ interface MessageDbRow {
   last_seen_at: string;
 }
 
+// Content-bearing columns (subject, body, recipients, list payload) are stored
+// encrypted when OFW_CACHE_KEY is set; decryptField transparently passes legacy
+// plaintext through, so this mapper is correct with encryption on or off.
 function rowFromDb(r: MessageDbRow): MessageRow {
   return {
     id: r.id,
     folder: r.folder as 'inbox' | 'sent',
-    subject: r.subject,
+    subject: decryptField(r.subject),
     fromUser: r.from_user,
     sentAt: r.sent_at,
-    recipients: JSON.parse(r.recipients_json) as Recipient[],
-    body: r.body,
+    recipients: JSON.parse(decryptField(r.recipients_json)) as Recipient[],
+    body: decryptNullable(r.body),
     fetchedBodyAt: r.fetched_body_at,
     replyToId: r.reply_to_id,
     chainRootId: r.chain_root_id,
-    listData: JSON.parse(r.list_data_json),
+    listData: JSON.parse(decryptField(r.list_data_json)),
   };
 }
 
@@ -196,15 +202,15 @@ export function upsertMessage(row: MessageRow): void {
   ).run(
     row.id,
     requireString('messages.folder', row.folder),
-    requireString('messages.subject', row.subject),
+    encryptField(requireString('messages.subject', row.subject)),
     requireString('messages.fromUser', row.fromUser),
     requireString('messages.sentAt', row.sentAt),
-    JSON.stringify(row.recipients ?? []),
-    nullish(row.body),
+    encryptField(JSON.stringify(row.recipients ?? [])),
+    encryptNullable(nullish(row.body)),
     nullish(row.fetchedBodyAt),
     nullish(row.replyToId),
     nullish(row.chainRootId),
-    JSON.stringify(row.listData ?? null),
+    encryptField(JSON.stringify(row.listData ?? null)),
     new Date().toISOString()
   );
 }
@@ -239,7 +245,13 @@ type MessageFilter = Omit<ListMessagesOptions, 'page' | 'size'>;
 
 // Build the WHERE clause + bound params for message queries. listMessages and
 // countMessages share this so the filter semantics can't drift.
-function buildMessageFilter(opts: MessageFilter): { where: string; params: unknown[] } {
+//
+// `includeQ` controls whether the `q` substring filter is emitted as SQL
+// `subject/body LIKE`. That only works on plaintext columns — when the cache is
+// encrypted the callers pass `includeQ: false` and apply `q` in memory after
+// decrypting (see listMessages/countMessages). The folder/since/until filters
+// are always SQL (they run on unencrypted columns).
+function buildMessageFilter(opts: MessageFilter, includeQ: boolean): { where: string; params: unknown[] } {
   const wheres: string[] = [];
   const params: unknown[] = [];
   if (opts.folder !== undefined) {
@@ -254,7 +266,7 @@ function buildMessageFilter(opts: MessageFilter): { where: string; params: unkno
     wheres.push('sent_at < ?');
     params.push(opts.until);
   }
-  if (opts.q !== undefined && opts.q.length > 0) {
+  if (includeQ && opts.q !== undefined && opts.q.length > 0) {
     const pattern = `%${opts.q}%`;
     wheres.push('(subject LIKE ? OR body LIKE ?)');
     params.push(pattern, pattern);
@@ -265,10 +277,32 @@ function buildMessageFilter(opts: MessageFilter): { where: string; params: unkno
   };
 }
 
+// Case-insensitive substring match on the decrypted subject+body, mirroring the
+// SQL `subject LIKE ? OR body LIKE ?` path for the encrypted in-memory branch.
+function matchesQuery(m: MessageRow, q: string): boolean {
+  const needle = q.toLowerCase();
+  return m.subject.toLowerCase().includes(needle)
+    || (m.body ?? '').toLowerCase().includes(needle);
+}
+
 export function listMessages(opts: ListMessagesOptions): MessageRow[] {
   const { db } = openCache();
-  const { where, params } = buildMessageFilter(opts);
   const offset = (opts.page - 1) * opts.size;
+  // Encrypted cache + a text query: subject/body are ciphertext, so LIKE can't
+  // run in SQL. Fetch the folder/date-filtered candidate set, decrypt, filter
+  // by substring in memory, then paginate. This is the documented cost of
+  // OFW_CACHE_KEY (search decrypts the candidate set in memory).
+  if (isCacheEncryptionEnabled() && opts.q !== undefined && opts.q.length > 0) {
+    const { where, params } = buildMessageFilter(opts, false);
+    const rows = db.prepare(
+      `SELECT * FROM messages ${where} ORDER BY sent_at DESC, id DESC`
+    ).all(...params as never[]) as unknown as MessageDbRow[];
+    return rows
+      .map(rowFromDb)
+      .filter((m) => matchesQuery(m, opts.q as string))
+      .slice(offset, offset + opts.size);
+  }
+  const { where, params } = buildMessageFilter(opts, true);
   const rows = db.prepare(
     `SELECT * FROM messages ${where}
      ORDER BY sent_at DESC, id DESC
@@ -279,7 +313,16 @@ export function listMessages(opts: ListMessagesOptions): MessageRow[] {
 
 export function countMessages(opts: MessageFilter): number {
   const { db } = openCache();
-  const { where, params } = buildMessageFilter(opts);
+  // Mirror listMessages: on an encrypted cache a text query is counted in
+  // memory after decrypting, since LIKE can't touch ciphertext columns.
+  if (isCacheEncryptionEnabled() && opts.q !== undefined && opts.q.length > 0) {
+    const { where, params } = buildMessageFilter(opts, false);
+    const rows = db.prepare(
+      `SELECT * FROM messages ${where}`
+    ).all(...params as never[]) as unknown as MessageDbRow[];
+    return rows.map(rowFromDb).filter((m) => matchesQuery(m, opts.q as string)).length;
+  }
+  const { where, params } = buildMessageFilter(opts, true);
   const r = db.prepare(`SELECT COUNT(*) as n FROM messages ${where}`)
     .get(...params as never[]) as { n: number } | undefined;
   /* v8 ignore next -- SELECT COUNT(*) always returns exactly one row; the ?./?? are defensive */
@@ -309,12 +352,12 @@ interface DraftDbRow {
 function draftFromDb(r: DraftDbRow): DraftRow {
   return {
     id: r.id,
-    subject: r.subject,
-    body: r.body,
-    recipients: JSON.parse(r.recipients_json) as Recipient[],
+    subject: decryptField(r.subject),
+    body: decryptField(r.body),
+    recipients: JSON.parse(decryptField(r.recipients_json)) as Recipient[],
     replyToId: r.reply_to_id,
     modifiedAt: r.modified_at,
-    listData: JSON.parse(r.list_data_json),
+    listData: JSON.parse(decryptField(r.list_data_json)),
   };
 }
 
@@ -332,12 +375,12 @@ export function upsertDraft(row: DraftRow): void {
        list_data_json=excluded.list_data_json`
   ).run(
     row.id,
-    requireString('drafts.subject', row.subject),
-    requireString('drafts.body', row.body),
-    JSON.stringify(row.recipients ?? []),
+    encryptField(requireString('drafts.subject', row.subject)),
+    encryptField(requireString('drafts.body', row.body)),
+    encryptField(JSON.stringify(row.recipients ?? [])),
     nullish(row.replyToId),
     requireString('drafts.modifiedAt', row.modifiedAt),
-    JSON.stringify(row.listData ?? null)
+    encryptField(JSON.stringify(row.listData ?? null))
   );
 }
 
@@ -449,11 +492,13 @@ interface AttachmentDbRow {
 function attachmentFromDb(r: AttachmentDbRow): AttachmentRow {
   return {
     fileId: r.file_id,
-    fileName: r.file_name,
-    label: r.label,
+    fileName: decryptField(r.file_name),
+    label: decryptField(r.label),
     mimeType: r.mime_type,
     sizeBytes: r.size_bytes,
-    metadata: JSON.parse(r.metadata_json),
+    metadata: JSON.parse(decryptField(r.metadata_json)),
+    // message_ids_json stays plaintext — it holds only numeric ids and is
+    // queried in SQL via json_each() by listAttachmentsForMessage.
     messageIds: JSON.parse(r.message_ids_json) as number[],
     downloadedPath: r.downloaded_path,
     downloadedAt: r.downloaded_at,
@@ -519,11 +564,11 @@ export function upsertAttachmentForMessage(input: UpsertAttachmentInput): void {
        fetched_metadata_at=excluded.fetched_metadata_at`
   ).run(
     input.fileId,
-    requireString('attachments.fileName', input.fileName),
-    requireString('attachments.label', input.label),
+    encryptField(requireString('attachments.fileName', input.fileName)),
+    encryptField(requireString('attachments.label', input.label)),
     requireString('attachments.mimeType', input.mimeType),
     nullish(input.sizeBytes),
-    JSON.stringify(input.metadata ?? null),
+    encryptField(JSON.stringify(input.metadata ?? null)),
     JSON.stringify(messageIds),
     new Date().toISOString()
   );
