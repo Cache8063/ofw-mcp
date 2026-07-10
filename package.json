@@ -24,9 +24,11 @@
     "server.json"
   ],
   "scripts": {
-    "build": "tsc && npm run bundle",
+    "build": "tsc && npm run bundle && npm run bundle:http",
     "bundle": "esbuild src/index.ts --bundle --platform=node --format=esm --external:dotenv --banner:js='import { createRequire as __createRequire } from \"module\"; const require = __createRequire(import.meta.url);' --outfile=dist/bundle.js",
+    "bundle:http": "esbuild src/http.ts --bundle --platform=node --format=esm --external:dotenv --banner:js='import { createRequire as __createRequire } from \"module\"; const require = __createRequire(import.meta.url);' --outfile=dist/http.js",
     "dev": "node --env-file=.env dist/index.js",
+    "start:http": "node dist/http.js",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest"

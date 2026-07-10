@@ -9,7 +9,10 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       include: ['src/**/*.ts'],
-      exclude: ['src/index.ts'], // stdio entry point — not unit-testable
+      exclude: [
+        'src/index.ts', // stdio entry point — not unit-testable
+        'src/http.ts',  // Streamable-HTTP entry point — exercised by the deploy smoke test
+      ],
       thresholds: {
         lines: 100,
         functions: 100,
