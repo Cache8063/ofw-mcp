@@ -18,7 +18,8 @@ npm run dev          # node --env-file=.env dist/index.js (requires built dist)
 ```
 src/
   index.ts          MCP server entry — SQLite-warning shim, then runMcp() from @chrischall/mcp-utils (builds McpServer, applies registrars with client as deps, prints banner, wires shutdown + stdio transport)
-  protocol.ts       Wire-level constants (BASE_URL, OFW_PROTOCOL_HEADERS, token TTL). Leaf module to break the client→auth→auth-password import cycle
+  protocol.ts       Wire-level constants (BASE_URL, OFW_PROTOCOL_HEADERS, token TTL) + assertOfwUrl() egress allowlist. Leaf module to break the client→auth→auth-password import cycle
+  cache-crypto.ts   Optional AES-256-GCM at-rest encryption for cache content columns (OFW_CACHE_KEY). encrypt/decryptField are no-ops when no key is set; decrypt passes legacy plaintext through
   client.ts         OFWClient (Bearer token, 401/429 retry, JSON + binary). Delegates auth to ./auth.ts
   auth.ts           resolveAuth(): three-path priority (env vars → fetchproxy fallback → error). Template for sibling MCPs
   auth-password.ts  loginWithPassword(): legacy OFW Spring Security form login (kept as own module so auth.ts can mock it cleanly)
@@ -44,11 +45,12 @@ OFW_USERNAME              Optional. OFW login email (legacy env-var auth path; a
 OFW_PASSWORD              Optional. OFW password (legacy env-var auth path)
 OFW_DISABLE_FETCHPROXY    Optional. "1|true|yes|on" → skip the fetchproxy fallback (missing creds become a hard error)
 OFW_CACHE_IDENTITY        Optional. Explicit cache-key label; overrides OFW_USERNAME for fetchproxy-only multi-account setups
+OFW_CACHE_KEY             Optional. base64(32 random bytes). When set, encrypts the cache's content columns (subject/body/recipients/list payloads, attachment names/metadata) at rest with AES-256-GCM. Keep it OUTSIDE the cache dir. No key = plaintext (backward compatible). Text search decrypts-and-filters in memory when set. See src/cache-crypto.ts
 OFW_CACHE_DIR             Optional. Overrides cache dir (default ~/.cache/ofw-mcp)
 OFW_ATTACHMENTS_DIR       Optional. Where ofw_download_attachment writes (default ~/Downloads/ofw-mcp)
 OFW_INLINE_ATTACHMENTS    Optional. "1|true|yes|on" → return attachments as MCP content blocks by default
 OFW_DEBUG_LOG             Optional. "1|true|yes|on" → log every OFW request/response to stderr (Authorization redacted). Diagnostic only.
-OFW_WRITE_MODE            Optional. "none" = no write tools registered; "drafts" = draft-level writes only (ofw_save_draft, ofw_delete_draft, ofw_upload_attachment — never send or calendar/expense/journal writes); "all" = everything (default). Unrecognized values fail closed to "none". Structural gate: gated tools are not registered at all, so no host setting or injected instruction can invoke them.
+OFW_WRITE_MODE            Optional. "none" = no write tools registered (DEFAULT in this fork — fail-safe); "drafts" = draft-level writes only (ofw_save_draft, ofw_delete_draft, ofw_upload_attachment — never send or calendar/expense/journal writes); "all" = everything. Unrecognized values fail closed to "none". Structural gate: gated tools are not registered at all, so no host setting or injected instruction can invoke them. (Upstream defaults to "all"; this fork defaults to "none".)
 ```
 
 `auth.ts` ignores blank values, the strings `"undefined"`/`"null"`, and unsubstituted `${VAR}` placeholders — defensive against MCP hosts passing the env block through unexpanded.
