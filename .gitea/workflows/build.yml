@@ -26,7 +26,10 @@ concurrency:
 env:
   IMAGE: gitea.ts.bkb.cx:3000/arcnode.xyz/ofw-mcp
   SERVICE: ofw-mcp
-  SECRET_FILE: /opt/mcp/ofw-mcp/secrets/ofw.env
+  # env_file consumed by the compose service (./ofw-mcp/.env). Lives under
+  # /opt/mcp/ofw-mcp/, which host.yml's --delete-after rsync does NOT touch
+  # (that only prunes /opt/mcp/infra/mcp-host/), so it survives GitOps deploys.
+  SECRET_FILE: /opt/mcp/ofw-mcp/.env
 
 jobs:
   ci-cd:
@@ -100,10 +103,10 @@ jobs:
           } | ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -i "$KEY_PATH" \
               root@mcp-host.ts.bkb.cx '
                 umask 077
-                mkdir -p /opt/mcp/ofw-mcp/secrets
-                cat > /opt/mcp/ofw-mcp/secrets/ofw.env
-                chmod 600 /opt/mcp/ofw-mcp/secrets/ofw.env
-                echo "provisioned ofw.env ($(wc -l < /opt/mcp/ofw-mcp/secrets/ofw.env) lines)"
+                mkdir -p /opt/mcp/ofw-mcp
+                cat > /opt/mcp/ofw-mcp/.env
+                chmod 600 /opt/mcp/ofw-mcp/.env
+                echo "provisioned ofw .env ($(wc -l < /opt/mcp/ofw-mcp/.env) lines)"
               '
 
       - name: "Deploy (pin sha + force-recreate on mcp-host)"
@@ -131,19 +134,19 @@ jobs:
             set -e
             ok=
             for i in $(seq 1 10); do
-              if docker exec ${{ env.SERVICE }} node -e "fetch(\"http://127.0.0.1:7330/healthz\").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
+              if docker exec ${{ env.SERVICE }} node -e "fetch(\"http://127.0.0.1:7328/healthz\").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
                 echo "healthy after $i tries"; ok=1; break
               fi
               sleep 3
             done
             [ -n "$ok" ] || { echo "healthcheck failed"; docker logs ${{ env.SERVICE }} --tail 50; exit 1; }
             # initialize handshake must return serverInfo; write tools must be ABSENT (WRITE_MODE=none default).
-            SID=$(curl -s -D - -o /dev/null -X POST http://127.0.0.1:7330/mcp \
+            SID=$(curl -s -D - -o /dev/null -X POST http://127.0.0.1:7328/mcp \
               -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
               -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"ci-smoke\",\"version\":\"0\"}}}" \
               | grep -i "^mcp-session-id:" | tr -d "\r" | awk "{print \$2}")
             [ -n "$SID" ] || { echo "no session id from initialize"; exit 1; }
-            TOOLS=$(curl -s -X POST http://127.0.0.1:7330/mcp -H "Content-Type: application/json" \
+            TOOLS=$(curl -s -X POST http://127.0.0.1:7328/mcp -H "Content-Type: application/json" \
               -H "Accept: application/json, text/event-stream" -H "mcp-session-id: $SID" \
               -d "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}")
             echo "$TOOLS" | grep -q "ofw_get_notifications" || { echo "read tools missing"; exit 1; }
