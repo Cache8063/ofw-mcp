@@ -6,6 +6,9 @@ import { defineConfig } from 'vitest/config';
 // `npm test` stays coverage-free for fast local iteration.
 export default defineConfig({
   test: {
+    // The suite runs in ~5s locally but ~170s on the shared Gitea runner
+    // (coverage instrumentation + loaded host); the 5s default trips there.
+    testTimeout: 30000,
     coverage: {
       provider: 'v8',
       include: ['src/**/*.ts'],
