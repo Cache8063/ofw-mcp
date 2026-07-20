@@ -96,10 +96,18 @@ jobs:
             echo "SKIP_DEPLOY=1" >> "$GITHUB_ENV"
             exit 0
           fi
-          # Build the env_file content locally, pipe via stdin.
-          { printf 'OFW_USERNAME=%s\n' "$OFW_USERNAME"
-            printf 'OFW_PASSWORD=%s\n' "$OFW_PASSWORD"
-            printf 'OFW_CACHE_KEY=%s\n' "$OFW_CACHE_KEY"
+          # Build the env_file content locally, pipe via stdin. Values are
+          # SINGLE-QUOTED: compose's dotenv parser interpolates $VAR inside
+          # unquoted values (a password containing `$word` silently loses that
+          # substring — bit us 2026-07-20); single quotes make it literal.
+          # A single quote inside a value would break this format — reject it
+          # loudly instead of provisioning a corrupted secret.
+          case "$OFW_USERNAME$OFW_PASSWORD$OFW_CACHE_KEY" in
+            *"'"*) echo "an OFW_* secret contains a single quote — unsupported by the env_file format; change it"; exit 1;;
+          esac
+          { printf "OFW_USERNAME='%s'\n" "$OFW_USERNAME"
+            printf "OFW_PASSWORD='%s'\n" "$OFW_PASSWORD"
+            printf "OFW_CACHE_KEY='%s'\n" "$OFW_CACHE_KEY"
           } | ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -i "$KEY_PATH" \
               root@mcp-host.ts.bkb.cx '
                 umask 077
